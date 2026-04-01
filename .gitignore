@@ -1,0 +1,4 @@
+.gstack/
+.claude/
+.DS_Store
+models/sls.stl
