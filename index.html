@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>アルテミス2 ミッションシミュレーター</title>
+<meta name="description" content="遊んだら軌道力学がわかる。アルテミス2の月フライバイを3Dで体験しよう。">
+<meta property="og:title" content="アルテミス2 ミッションシミュレーター">
+<meta property="og:description" content="宇宙船を飛ばしながら学ぶ軌道設計。TLIって何？フライバイって何？触ればわかる。">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="アルテミス2 ミッションシミュレーター">
+<meta name="twitter:description" content="遊んだら軌道力学がわかる。月まで行って帰るには、何をどれだけ間違えられないのか。">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a1a;--text:#e0e0ff;--muted:#8888aa;--panel:rgba(10,10,30,0.85);
+  --cyan:#4fc3f7;--amber:#ff9800;--earth:#4488ff;--moon:#aaa;
+  --danger:#ff4444;--success:#44ff88;
+}
+html,body{width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;background:var(--bg);color:var(--text)}
+#canvas-container{position:absolute;inset:0;z-index:0}
+canvas{display:block}
+
+/* Header */
+#header{position:fixed;top:0;left:0;right:0;z-index:10;display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:var(--panel);backdrop-filter:blur(8px);border-bottom:1px solid rgba(255,255,255,0.08)}
+#header h1{font-size:16px;font-weight:600;letter-spacing:0.5px}
+#header .subtitle{font-size:11px;color:var(--muted);margin-left:8px}
+#share-btn{background:none;border:1px solid var(--cyan);color:var(--cyan);padding:4px 12px;border-radius:4px;font-size:12px;cursor:pointer;transition:all .2s}
+#share-btn:hover{background:var(--cyan);color:var(--bg)}
+.cam-btn{background:none;border:1px solid var(--muted);color:var(--muted);padding:3px 8px;border-radius:3px;font-size:11px;cursor:pointer;transition:all .2s}
+.cam-btn:hover{border-color:var(--text);color:var(--text)}
+.cam-btn.active{border-color:var(--cyan);color:var(--cyan);background:rgba(79,195,247,0.1)}
+
+/* Info Panel (right side) */
+#info-panel{position:fixed;top:48px;right:0;width:320px;bottom:120px;z-index:10;background:var(--panel);backdrop-filter:blur(8px);border-left:1px solid rgba(255,255,255,0.08);padding:16px;overflow-y:auto;transition:transform .3s}
+#info-panel h2{font-size:18px;margin-bottom:4px;color:var(--cyan)}
+#info-panel .phase-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+#info-panel .description{font-size:14px;line-height:1.7;margin-bottom:12px}
+.detail-toggle{font-size:12px;color:var(--cyan);cursor:pointer;user-select:none;margin-bottom:8px;display:inline-block}
+.detail-content{display:none;font-size:13px;line-height:1.6;color:var(--muted);padding:8px 0;border-top:1px solid rgba(255,255,255,0.05)}
+.detail-content.open{display:block}
+.glossary{margin-top:12px;padding:8px;background:rgba(79,195,247,0.08);border-radius:6px;font-size:12px;line-height:1.5}
+.glossary dt{color:var(--cyan);font-weight:600;margin-top:4px}
+.glossary dd{color:var(--muted);margin-bottom:4px}
+
+/* TLI Slider */
+#tli-control{margin-top:16px;padding:12px;background:rgba(255,152,0,0.08);border-radius:6px;border:1px solid rgba(255,152,0,0.2)}
+#tli-control label{font-size:12px;color:var(--amber);font-weight:600;display:block;margin-bottom:6px}
+#tli-control input[type=range]{width:100%;accent-color:var(--amber)}
+#tli-control .tli-value{font-size:11px;color:var(--muted);margin-top:4px}
+#tli-result{margin-top:8px;font-size:12px;padding:6px 8px;border-radius:4px}
+#tli-result.success{background:rgba(68,255,136,0.1);color:var(--success)}
+#tli-result.danger{background:rgba(255,68,68,0.1);color:var(--danger)}
+
+/* Bottom Controls */
+#controls{position:fixed;bottom:60px;left:0;right:0;z-index:10;display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--panel);backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,0.08)}
+#play-btn{width:36px;height:36px;border-radius:50%;border:1px solid var(--cyan);background:none;color:var(--cyan);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+#play-btn:hover{background:var(--cyan);color:var(--bg)}
+#speed-btn{background:none;border:1px solid var(--muted);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;cursor:pointer;flex-shrink:0;min-width:48px}
+#timeline{flex:1;height:6px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,0.1);border-radius:3px;outline:none;cursor:pointer}
+#timeline::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--cyan);cursor:pointer}
+#met-display{font-size:11px;color:var(--muted);flex-shrink:0;min-width:100px;text-align:right}
+
+/* Phase markers on timeline */
+#phase-markers{position:fixed;bottom:98px;left:80px;right:130px;z-index:10;display:flex;height:16px;pointer-events:none}
+.phase-marker{font-size:9px;color:var(--muted);position:absolute;transform:translateX(-50%);white-space:nowrap}
+
+/* Stats Bar */
+#stats{position:fixed;bottom:0;left:0;right:0;z-index:10;display:flex;align-items:center;justify-content:space-around;padding:8px 16px;background:var(--panel);backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,0.08);font-size:12px}
+.stat{display:flex;flex-direction:column;align-items:center;gap:2px}
+.stat-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px}
+.stat-value{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
+#gravity-bar{width:80px;height:6px;border-radius:3px;overflow:hidden;display:flex}
+#gravity-earth{background:var(--earth);height:100%;transition:width .3s}
+#gravity-moon{background:var(--moon);height:100%;transition:width .3s}
+#comm-status{padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600}
+#comm-status.ok{background:rgba(68,255,136,0.15);color:var(--success)}
+#comm-status.blackout{background:rgba(255,68,68,0.15);color:var(--danger);animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.5}}
+
+/* Clock */
+#clock{position:fixed;top:52px;left:16px;z-index:10;pointer-events:none}
+#clock-met{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:1px;text-shadow:0 2px 8px rgba(0,0,0,0.6)}
+#clock-local{font-size:14px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
+
+/* Event banner */
+#event-banner{position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(255,152,0,0.9);color:#000;padding:6px 20px;border-radius:4px;font-size:14px;font-weight:600;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap}
+
+/* Responsive */
+@media(max-width:768px){
+  #info-panel{top:auto;bottom:120px;left:0;right:0;width:100%;max-height:40vh;border-left:none;border-top:1px solid rgba(255,255,255,0.08)}
+  #phase-markers{display:none}
+}
+
+/* Loading */
+#loading{position:fixed;inset:0;z-index:100;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;transition:opacity .5s}
+#loading.hidden{opacity:0;pointer-events:none}
+#loading h2{font-size:20px}
+#loading p{font-size:13px;color:var(--muted)}
+.spinner{width:32px;height:32px;border:3px solid rgba(255,255,255,0.1);border-top-color:var(--cyan);border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div id="loading"><div class="spinner"></div><h2>Artemis II</h2><p>ミッションデータを準備中...</p></div>
+
+<div id="canvas-container"></div>
+<div id="clock">
+  <div id="clock-met">T+00d 00:00:00</div>
+  <div id="clock-local"></div>
+</div>
+
+<div id="header">
+  <div style="display:flex;align-items:baseline">
+    <h1>Artemis II Simulator</h1>
+    <span class="subtitle">遊んだら軌道力学がわかる</span>
+  </div>
+  <div style="display:flex;gap:4px;align-items:center">
+    <div id="cam-btns" style="display:flex;gap:2px">
+      <button class="cam-btn active" data-cam="free" onclick="setCam('free')">自由</button>
+      <button class="cam-btn" data-cam="craft" onclick="setCam('craft')">宇宙船</button>
+      <button class="cam-btn" data-cam="earth" onclick="setCam('earth')">地球</button>
+      <button class="cam-btn" data-cam="moon" onclick="setCam('moon')">月</button>
+    </div>
+    <button id="share-btn" onclick="shareOnTwitter()">共有</button>
+  </div>
+</div>
+
+<div id="info-panel">
+  <div class="phase-label" id="phase-label">PHASE 0</div>
+  <h2 id="phase-title">打ち上げ準備</h2>
+  <div class="description" id="phase-desc"></div>
+  <span class="detail-toggle" id="detail-toggle" onclick="toggleDetail()">もっと詳しく ▼</span>
+  <div class="detail-content" id="detail-content"></div>
+  <div class="glossary" id="glossary" style="display:none"></div>
+  <div id="tli-control">
+    <label>月への押し出し（TLI）の強さ</label>
+    <input type="range" id="tli-slider" min="70" max="130" value="100" step="1">
+    <div class="tli-value">Δv: <span id="tli-pct">100</span>% （名目値）</div>
+    <div id="tli-result" class="success">正常: 自由帰還軌道</div>
+  </div>
+</div>
+
+<div id="event-banner"></div>
+<div id="phase-markers"></div>
+
+<div id="controls">
+  <button id="play-btn" onclick="togglePlay()">&#9654;&#xFE0E;</button>
+  <button id="speed-btn" onclick="cycleSpeed()">100x</button>
+  <input type="range" id="timeline" min="0" max="1000" value="0" step="1">
+  <div id="met-display">T+ 0日 00:00</div>
+</div>
+
+<div id="stats">
+  <div class="stat">
+    <span class="stat-label">地球からの距離</span>
+    <span class="stat-value" id="dist-earth">6,578 km</span>
+    <span class="stat-label" id="dist-compare">東京↔大阪 × 14</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">速度</span>
+    <span class="stat-value" id="speed-val">7.8 km/s</span>
+    <span class="stat-label" id="speed-compare">音速の 23 倍</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">重力の綱引き</span>
+    <div style="display:flex;align-items:center;gap:4px">
+      <span style="font-size:10px;color:var(--earth)">地球</span>
+      <div id="gravity-bar"><div id="gravity-earth" style="width:95%"></div><div id="gravity-moon" style="width:5%"></div></div>
+      <span style="font-size:10px;color:var(--moon)">月</span>
+    </div>
+  </div>
+  <div class="stat">
+    <span class="stat-label">通信</span>
+    <span id="comm-status" class="ok">正常</span>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ============================================================
+// Constants
+// ============================================================
+// Scale: 1 scene unit = 3844 km (384400 km / 100 units)
+const SCALE_KM = 3844;
+const earthR = 6378 / SCALE_KM;   // ~1.66 scene units
+const moonR  = 1737 / SCALE_KM;   // ~0.45 scene units
+const SOUND_SPEED = 0.343;          // km/s
+const TOKYO_OSAKA = 500;            // km
+const GM_EARTH = 398600;            // km^3/s^2
+const GM_MOON = 4903;               // km^3/s^2
+
+// Mission timeline (MET in hours) — from NASA press kit
+const PHASES = [
+  { name: '地球周回', start: 0,     end: 25.6,  color: '#4fc3f7' },
+  { name: 'TLI',     start: 25.6,  end: 27,    color: '#ff9800' },
+  { name: '月への巡航', start: 27,  end: 103,   color: '#4fc3f7' },
+  { name: '月フライバイ', start: 103, end: 139.8, color: '#e040fb' },
+  { name: '地球帰還', start: 139.8, end: 215,   color: '#ff9800' },
+  { name: '再突入',   start: 215,   end: 217.8, color: '#ff4444' },
+];
+
+// ============================================================
+// State
+// ============================================================
+let playing = false;
+let speedMultiplier = 100;
+const speeds = [1, 10, 100, 1000, 10000];
+let speedIdx = 2;
+let metHours = 3.6;
+let horizData = null;
+let trajCurve = null;
+let trajLine = null;
+let camMode = 'free'; // 'free' | 'craft' | 'earth' | 'moon'
+
+// ============================================================
+// Load real trajectory from JPL Horizons data
+// ============================================================
+async function loadTrajectory() {
+  const resp = await fetch('trajectory.json');
+  horizData = await resp.json();
+  return horizData;
+}
+
+// Interpolate trajectory data at a given MET (hours)
+function interpAt(metH) {
+  const pts = horizData.points;
+  if (metH <= pts[0].met) return pts[0];
+  if (metH >= pts[pts.length-1].met) return pts[pts.length-1];
+  // Binary search
+  let lo = 0, hi = pts.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (pts[mid].met <= metH) lo = mid; else hi = mid;
+  }
+  const a = pts[lo], b = pts[hi];
+  const t = (metH - a.met) / (b.met - a.met);
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+    z: a.z + (b.z - a.z) * t,
+    mx: a.mx + (b.mx - a.mx) * t,
+    my: a.my + (b.my - a.my) * t,
+    mz: a.mz + (b.mz - a.mz) * t,
+    spd: a.spd + (b.spd - a.spd) * t,
+    dE: a.dE + (b.dE - a.dE) * t,
+    dM: a.dM + (b.dM - a.dM) * t,
+    met: metH,
+  };
+}
+
+// ============================================================
+// Scene Setup
+// ============================================================
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
+camera.position.set(30, 80, 120);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x0a0a1a);
+container.appendChild(renderer.domElement);
+
+const orbitControls = new OrbitControls(camera, renderer.domElement);
+orbitControls.enableDamping = true;
+orbitControls.dampingFactor = 0.05;
+orbitControls.target.set(-20, -40, -20);
+orbitControls.minDistance = 10;
+orbitControls.maxDistance = 500;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x333355, 1.5));
+// Sun direction from JPL Horizons (ICRF, 2026-Apr-02, body ID 10)
+// Normalized: (0.9782, 0.1905, 0.0826) — distance 149.5 million km
+// 10日間のミッション中に太陽方向は約10°しか変化しないため固定値で十分。
+// 地球表面の昼夜はERA（自転角度）で表現される。
+const sunLight = new THREE.DirectionalLight(0xffffff, 2);
+sunLight.position.set(0.9782, 0.1905, 0.0826).multiplyScalar(500);
+scene.add(sunLight);
+
+// Stars
+const starGeo = new THREE.BufferGeometry();
+const starVerts = new Float32Array(3000 * 3);
+for (let i = 0; i < 3000; i++) {
+  const r = 500 + Math.random() * 500;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  starVerts[i*3] = r * Math.sin(phi) * Math.cos(theta);
+  starVerts[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+  starVerts[i*3+2] = r * Math.cos(phi);
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starVerts, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.8, sizeAttenuation: true })));
+
+// Texture loader
+const texLoader = new THREE.TextureLoader();
+
+// Earth (at origin) — NASA Blue Marble texture
+const earthGroup = new THREE.Group();
+const earthMat = new THREE.MeshPhongMaterial({ color: 0x2255cc, emissive: 0x112244, shininess: 30 });
+texLoader.load('textures/earth.jpg', tex => {
+  earthMat.map = tex; earthMat.color.set(0xffffff); earthMat.emissive.set(0x000000); earthMat.needsUpdate = true;
+});
+const earthMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 48), earthMat);
+earthMesh.scale.setScalar(earthR);
+earthGroup.add(earthMesh);
+const atmosMat = new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.12, side: THREE.BackSide });
+const atmosMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 32), atmosMat);
+atmosMesh.scale.setScalar(earthR * 1.08);
+earthGroup.add(atmosMesh);
+// ICRF: Earth's rotation axis ≈ Z axis. Three.js sphere pole is Y.
+// Rotate group so pole aligns with Z.
+earthGroup.rotation.x = Math.PI / 2;
+scene.add(earthGroup);
+
+// Earth Rotation Angle (ERA) — IAU 2000 model
+function getERA(jd) {
+  return 2 * Math.PI * (0.7790572732640 + 1.00273781191135448 * (jd - 2451545.0));
+}
+
+// Moon — NASA SVS LRO color map
+const moonGroup = new THREE.Group();
+const moonMat = new THREE.MeshPhongMaterial({ color: 0x888888, emissive: 0x222222, shininess: 10 });
+texLoader.load(
+  'textures/moon.jpg',
+  tex => { moonMat.map = tex; moonMat.color.set(0xffffff); moonMat.emissive.set(0x000000); moonMat.needsUpdate = true; }
+);
+const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 32), moonMat);
+moonMesh.scale.setScalar(moonR);
+moonGroup.add(moonMesh);
+scene.add(moonGroup);
+
+// Moon orbit trail (built from trajectory data after load)
+let moonOrbitLine = null;
+function buildMoonOrbitLine() {
+  if (moonOrbitLine) scene.remove(moonOrbitLine);
+  const pts = horizData.points;
+  // Sample moon positions (every 10th point to keep it light)
+  const positions = [];
+  for (let i = 0; i < pts.length; i += 10) {
+    positions.push(new THREE.Vector3(pts[i].mx, pts[i].my, pts[i].mz));
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(positions);
+  moonOrbitLine = new THREE.Line(geo, new THREE.LineBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.08
+  }));
+  scene.add(moonOrbitLine);
+}
+
+
+// Spacecraft (Orion) — small bright dot + locator ring
+const scGroup = new THREE.Group();
+
+// Bright dot (tiny)
+const scDot = new THREE.Mesh(
+  new THREE.SphereGeometry(0.03, 8, 8),
+  new THREE.MeshBasicMaterial({ color: 0xffffff })
+);
+scGroup.add(scDot);
+
+// Inner glow
+const scGlow = new THREE.Mesh(
+  new THREE.SphereGeometry(0.12, 8, 8),
+  new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.3 })
+);
+scGroup.add(scGlow);
+
+// KSC marker (red dot, rotates with Earth)
+const kscMarker = new THREE.Mesh(
+  new THREE.SphereGeometry(0.05, 8, 8),
+  new THREE.MeshBasicMaterial({ color: 0xff0000 })
+);
+// KSC in ECEF (fixed to Earth surface)
+// lat 28.5724°N, lon -80.649°W
+const KSC_LAT = 28.5724 * Math.PI / 180;
+const KSC_LON = -80.649 * Math.PI / 180;
+const KSC_ECEF = [
+  earthR * Math.cos(KSC_LAT) * Math.cos(KSC_LON),
+  earthR * Math.cos(KSC_LAT) * Math.sin(KSC_LON),
+  earthR * Math.sin(KSC_LAT)
+];
+scene.add(kscMarker);
+
+// Locator ring — "このあたりにいる"
+const ringGeo = new THREE.RingGeometry(1.5, 1.65, 64);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.25, side: THREE.DoubleSide });
+const scRing = new THREE.Mesh(ringGeo, ringMat);
+scGroup.add(scRing);
+
+scene.add(scGroup);
+
+// Communication line (Earth → spacecraft)
+const commLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+const commLineMat = new THREE.LineBasicMaterial({ color: 0x44ff88, transparent: true, opacity: 0.3 });
+const commLine = new THREE.Line(commLineGeo, commLineMat);
+scene.add(commLine);
+
+// Build trajectory line from real data with spline interpolation
+function buildTrajectoryLine() {
+  if (trajLine) scene.remove(trajLine);
+  const pts = horizData.points;
+
+  const phaseColors = [
+    new THREE.Color(0x4fc3f7), new THREE.Color(0xff9800),
+    new THREE.Color(0x4fc3f7), new THREE.Color(0xe040fb),
+    new THREE.Color(0xff9800), new THREE.Color(0xff4444),
+  ];
+
+  // Use CatmullRomCurve3 for smooth interpolation
+  const controlPts = pts.map(p => new THREE.Vector3(p.x, p.y, p.z));
+  const curve = new THREE.CatmullRomCurve3(controlPts, false, 'catmullrom', 0.5);
+  const subdivisions = 4000;
+  const curvePoints = curve.getPoints(subdivisions);
+
+  const positions = new Float32Array(curvePoints.length * 3);
+  const colors = new Float32Array(curvePoints.length * 3);
+  for (let i = 0; i < curvePoints.length; i++) {
+    const p = curvePoints[i];
+    positions[i*3] = p.x; positions[i*3+1] = p.y; positions[i*3+2] = p.z;
+    // Map curve parameter to MET for coloring
+    const t = i / curvePoints.length;
+    const metH = pts[0].met + t * (pts[pts.length-1].met - pts[0].met);
+    let pi = PHASES.findIndex(ph => metH >= ph.start && metH < ph.end);
+    if (pi < 0) pi = PHASES.length - 1;
+    const c = phaseColors[pi];
+    colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  trajLine = new THREE.Line(geo, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.6
+  }));
+  scene.add(trajLine);
+}
+
+// ============================================================
+// Explanation Content
+// ============================================================
+const explanations = [
+  {
+    title: '地球周回',
+    desc: '宇宙船はまず地球の周りを回りながら、すべてのシステムが正常に動いているか確認しています。高度約200km、時速28,000km。地球を約90分で1周します。',
+    detail: '打ち上げ後、宇宙船は最初にICPS（暫定極低温推進ステージ）と一緒に地球を周回します。この間にエンジン、生命維持装置、通信、航法の全チェックを行います。すべてOKなら、月への大噴射に進みます。',
+    glossary: { 'LEO（低軌道）': '高度200〜2,000kmの地球周回軌道。ISS もここを飛んでいる。', '周回速度': '約7.8 km/s。これより遅いと落ちる。速いと遠くへ行く。' }
+  },
+  {
+    title: 'TLI — 月遷移噴射',
+    desc: 'ここがミッション最大の瞬間。エンジンを大きく噴射して、地球の周回軌道から月へ向かうコースに乗ります。速度は秒速10.8kmに。東京から大阪まで約50秒。',
+    detail: 'TLI（Trans-Lunar Injection）は、宇宙船を月へ向かわせる決定的な噴射。ICPSのRL10エンジンが約6分間燃焼し、秒速約3km/sの加速を行います。このΔv（速度変化）の大きさと方向で、月への到達や帰還軌道のすべてが決まります。',
+    glossary: { 'TLI': '月遷移噴射。地球の周り→月行きに切り替える加速。', 'Δv（デルタブイ）': '速度変化量。宇宙船がどれだけ加速するかの尺度。ロケットの「燃費」のようなもの。' }
+  },
+  {
+    title: '月への巡航',
+    desc: 'エンジンは止まっていますが、宇宙船は慣性で進み続けます。地球の重力で少しずつ減速しながら、約3日かけて月へ。月が近づくにつれ、月の重力が効き始めます。',
+    detail: '地球と月の重力の「綱引き」が起きています。地球から離れるほど地球の引力は弱まり、月に近づくほど月の引力が強まります。ある地点（ラグランジュ点L1付近）で両方の力がほぼ釣り合います。途中で軌道補正噴射（OTC）を行い、コースを微修正します。',
+    glossary: { '慣性': '動いている物体は、力が加わらなければ同じ速度で動き続ける（ニュートンの第1法則）。', '軌道補正': '計画した軌道からの小さなずれを修正する、ごく小さな噴射。' }
+  },
+  {
+    title: '月フライバイ',
+    desc: 'ミッション最大の見どころ。月の裏側を約8,900kmの高さで通過し、月の重力で進路を曲げてもらいます。裏側通過中は地球との通信が約40分途切れます。',
+    detail: '月の重力が宇宙船の進行方向を大きく曲げます。これが「フライバイ」です。月の質量、宇宙船の速度、最接近距離の3つで曲がり角が決まります。アルテミス2はこの曲がりで自然に地球に戻れる「自由帰還軌道」を使っています。アポロ13号も緊急時にこの軌道で帰還しました。',
+    glossary: { 'フライバイ': '天体の近くを通り、重力で進路を変えること。燃料ゼロで方向転換。', '自由帰還軌道': '月の重力だけで自然に地球へ戻れる軌道。安全設計の要。', '通信断': '月が地球と宇宙船の間に入り、電波が遮られる状態。' }
+  },
+  {
+    title: '地球帰還',
+    desc: '月の重力に曲げてもらった軌道は、自然に地球へ向かっています。約4日かけて帰還。途中で帰還軌道補正（RTC）を行い、再突入角度を調整します。',
+    detail: '帰りの軌道はほぼ月の重力だけで成り立っていますが、微修正が必要です。再突入角度の許容範囲は非常に狭く、浅すぎると大気で弾かれ（スキップアウト）、深すぎると加熱に耐えられません。RTCで角度を正確に合わせます。',
+    glossary: { 'RTC': '帰還軌道補正（Return Trajectory Correction）。帰り道を微修正する噴射。', '再突入角度': '地球大気に入る角度。許容範囲はわずか数度。' }
+  },
+  {
+    title: '再突入・着水',
+    desc: '秒速11kmで大気圏に突入。温度は約2,800℃に。ヒートシールドが宇宙船を守ります。パラシュートが開き、太平洋に着水。約10日間のミッション完了。',
+    detail: '再突入は「スキップ・エントリー」方式。一度大気で減速した後、少し跳ね上がってから再び降下します。これにより加熱ピークを分散し、着水地点を精密に制御します。着水後2時間以内に回収チームが到着します。',
+    glossary: { 'ヒートシールド': '再突入時の高温から宇宙船を守る盾。約2,800℃に耐える。', 'スキップ・エントリー': '大気で一度バウンドしてから着水する方式。アルテミス独自。' }
+  },
+];
+
+// ============================================================
+// UI Updates
+// ============================================================
+function getCurrentPhaseIdx(metH) {
+  for (let i = PHASES.length - 1; i >= 0; i--) {
+    if (metH >= PHASES[i].start) return i;
+  }
+  return 0;
+}
+
+function updateInfoPanel(metH) {
+  const idx = getCurrentPhaseIdx(metH);
+  const exp = explanations[idx];
+  document.getElementById('phase-label').textContent = `PHASE ${idx}`;
+  document.getElementById('phase-title').textContent = exp.title;
+  document.getElementById('phase-desc').textContent = exp.desc;
+  document.getElementById('detail-content').innerHTML = exp.detail;
+  const glossDiv = document.getElementById('glossary');
+  if (exp.glossary && Object.keys(exp.glossary).length) {
+    let html = '<dl>';
+    for (const [term, def] of Object.entries(exp.glossary)) {
+      html += `<dt>${term}</dt><dd>${def}</dd>`;
+    }
+    glossDiv.innerHTML = html + '</dl>';
+    glossDiv.style.display = 'block';
+  } else {
+    glossDiv.style.display = 'none';
+  }
+}
+
+// ============================================================
+// Communication blackout check
+// ============================================================
+function checkBlackout(scPos, moonPos) {
+  // Is the Moon between Earth (origin) and the spacecraft?
+  const dir = scPos.clone().normalize();
+  const len = scPos.length();
+  const toMoon = moonPos.clone();
+  const proj = toMoon.dot(dir);
+  if (proj < 0 || proj > len) return false;
+  const closest = dir.clone().multiplyScalar(proj);
+  return closest.distanceTo(moonPos) < moonR * 1.2;
+}
+
+// ============================================================
+// Timeline & Controls
+// ============================================================
+const MISSION_HOURS = 217.8;
+const timeline = document.getElementById('timeline');
+timeline.addEventListener('input', () => {
+  metHours = (timeline.value / 1000) * MISSION_HOURS;
+  updateFrame(metHours);
+});
+
+// TLI slider — educational "what if" (note: shows info only, real data stays)
+document.getElementById('tli-slider').addEventListener('input', (e) => {
+  const val = parseInt(e.target.value);
+  document.getElementById('tli-pct').textContent = val;
+  const tli = val / 100;
+  let msg, css;
+  if (tli < 0.82) { msg = '推力不足: 月に届かず地球に落下'; css = 'danger'; }
+  else if (tli < 0.88) { msg = '推力不足: 軌道が不安定'; css = 'danger'; }
+  else if (tli > 1.18) { msg = '推力過大: 宇宙に飛び出す'; css = 'danger'; }
+  else if (tli > 1.12) { msg = '注意: 月に近づきすぎ'; css = 'danger'; }
+  else { msg = '正常: 自由帰還軌道'; css = 'success'; }
+  const r = document.getElementById('tli-result');
+  r.textContent = msg; r.className = css;
+});
+
+window.togglePlay = () => {
+  playing = !playing;
+  document.getElementById('play-btn').innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
+};
+
+window.cycleSpeed = () => {
+  speedIdx = (speedIdx + 1) % speeds.length;
+  speedMultiplier = speeds[speedIdx];
+  document.getElementById('speed-btn').textContent = speedMultiplier >= 10000 ? 'MAX' : speedMultiplier + 'x';
+};
+
+window.toggleDetail = () => {
+  const el = document.getElementById('detail-content');
+  const toggle = document.getElementById('detail-toggle');
+  el.classList.toggle('open');
+  toggle.textContent = el.classList.contains('open') ? 'たたむ ▲' : 'もっと詳しく ▼';
+};
+
+window.setCam = (mode) => {
+  camMode = mode;
+  document.querySelectorAll('.cam-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.cam === mode);
+  });
+  // Free mode: re-enable orbit controls damping target
+  if (mode === 'free') {
+    orbitControls.enabled = true;
+  }
+};
+
+window.shareOnTwitter = () => {
+  const text = encodeURIComponent('アルテミス2の軌道シミュレーター。JPL Horizonsの実軌道データで月フライバイを3D体験。\n\n');
+  const url = encodeURIComponent(window.location.href);
+  window.open(`https://twitter.com/intent/tweet?text=${text}&url=${url}`, '_blank');
+};
+
+// Phase markers + event markers (built after data loads)
+function buildMarkers() {
+  const markersEl = document.getElementById('phase-markers');
+  markersEl.innerHTML = '';
+  // Phase labels
+  PHASES.forEach(p => {
+    const pct = ((p.start + p.end) / 2 / MISSION_HOURS) * 100;
+    const m = document.createElement('div');
+    m.className = 'phase-marker';
+    m.style.left = pct + '%';
+    m.textContent = p.name;
+    m.style.color = p.color;
+    markersEl.appendChild(m);
+  });
+  // Event tick marks on timeline
+  if (horizData && horizData.events) {
+    horizData.events.forEach(ev => {
+      const pct = (ev.met / MISSION_HOURS) * 100;
+      if (pct < 0 || pct > 100) return;
+      const tick = document.createElement('div');
+      tick.style.cssText = `position:absolute;left:${pct}%;top:12px;width:1px;height:6px;background:var(--amber);opacity:0.5`;
+      markersEl.appendChild(tick);
+    });
+  }
+}
+
+// Current event display
+let lastEventIdx = -1;
+function getCurrentEvent(metH) {
+  if (!horizData || !horizData.events) return null;
+  const evts = horizData.events;
+  for (let i = evts.length - 1; i >= 0; i--) {
+    if (metH >= evts[i].met) return { idx: i, ...evts[i] };
+  }
+  return null;
+}
+
+// ============================================================
+// Frame update — position everything from real data
+// ============================================================
+function updateFrame(metH) {
+  if (!horizData) return;
+  const d = interpAt(metH);
+
+  // Spacecraft position
+  scGroup.position.set(d.x, d.y, d.z);
+
+  // Moon position (dynamic!)
+  moonGroup.position.set(d.mx, d.my, d.mz);
+
+  // Comm line
+  const cp = commLine.geometry.attributes.position;
+  cp.setXYZ(0, 0, 0, 0);
+  cp.setXYZ(1, d.x, d.y, d.z);
+  cp.needsUpdate = true;
+
+  // Blackout check
+  const scPos = new THREE.Vector3(d.x, d.y, d.z);
+  const moonPos = new THREE.Vector3(d.mx, d.my, d.mz);
+  const blackout = checkBlackout(scPos, moonPos);
+  const comm = document.getElementById('comm-status');
+  if (blackout) {
+    comm.textContent = '通信断'; comm.className = 'blackout';
+    commLineMat.color.setHex(0xff4444); commLineMat.opacity = 0.1;
+  } else {
+    comm.textContent = '正常'; comm.className = 'ok';
+    commLineMat.color.setHex(0x44ff88); commLineMat.opacity = 0.3;
+  }
+
+  // Stats
+  document.getElementById('dist-earth').textContent = Math.round(d.dE).toLocaleString() + ' km';
+  const osakaX = Math.round(d.dE / TOKYO_OSAKA);
+  document.getElementById('dist-compare').textContent = osakaX > 1 ? `東京↔大阪 × ${osakaX.toLocaleString()}` : '';
+
+  document.getElementById('speed-val').textContent = d.spd.toFixed(1) + ' km/s';
+  document.getElementById('speed-compare').textContent = `音速の ${Math.round(d.spd / SOUND_SPEED).toLocaleString()} 倍`;
+
+  const gE = GM_EARTH / (d.dE * d.dE);
+  const gM = GM_MOON / (d.dM * d.dM);
+  const ePct = gE / (gE + gM) * 100;
+  document.getElementById('gravity-earth').style.width = ePct + '%';
+  document.getElementById('gravity-moon').style.width = (100 - ePct) + '%';
+
+  // MET display
+  const days = Math.floor(metH / 24);
+  const hrs = Math.floor(metH % 24);
+  const mins = Math.floor((metH * 60) % 60);
+  const secs = Math.floor((metH * 3600) % 60);
+  const metStr = `T+${String(days).padStart(2,'0')}d ${String(hrs).padStart(2,'0')}:${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+  document.getElementById('met-display').textContent = metStr;
+  document.getElementById('clock-met').textContent = metStr;
+
+  // Local time: launch 2026-04-01 22:24 UTC + MET
+  const launchUTC = new Date(Date.UTC(2026, 3, 1, 22, 24, 0));
+  const current = new Date(launchUTC.getTime() + metH * 3600 * 1000);
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const localStr = current.toLocaleString(undefined, {
+    month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false
+  });
+  document.getElementById('clock-local').textContent = `${localStr} ${tz}`;
+
+  // Info panel
+  updateInfoPanel(metH);
+
+  // Event notification
+  const ev = getCurrentEvent(metH);
+  if (ev && ev.idx !== lastEventIdx) {
+    lastEventIdx = ev.idx;
+    const evEl = document.getElementById('event-banner');
+    evEl.textContent = `▶ ${ev.name}`;
+    evEl.style.opacity = '1';
+    setTimeout(() => { evEl.style.opacity = '0'; }, 3000);
+  }
+}
+
+// ============================================================
+// Animation Loop
+// ============================================================
+let lastTime = performance.now();
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+  if (playing && horizData) {
+    metHours += (dt * speedMultiplier) / 3600;
+    const maxMet = horizData.last_met_h;
+    if (metHours > maxMet) metHours = horizData.first_met_h;
+    timeline.value = (metHours / MISSION_HOURS) * 1000;
+    updateFrame(metHours);
+  }
+
+  // Locator ring always faces camera
+  scRing.lookAt(camera.position);
+
+  // Glow pulse
+  scGlow.material.opacity = 0.25 + 0.15 * Math.sin(now * 0.003);
+
+  // Camera follow modes
+  if (camMode !== 'free' && horizData) {
+    const d = interpAt(metHours);
+    const scPos = new THREE.Vector3(d.x, d.y, d.z);
+    const moonPos = new THREE.Vector3(d.mx, d.my, d.mz);
+    const earthPos = new THREE.Vector3(0, 0, 0);
+    const nearEarth = d.dE < 50000; // within 50,000 km of Earth
+
+    if (camMode === 'craft') {
+      if (nearEarth) {
+        // Near Earth: look at spacecraft with Earth as background
+        const earthToSc = scPos.clone().sub(earthPos).normalize();
+        const camTarget = scPos;
+        const camPos = scPos.clone().add(earthToSc.multiplyScalar(3));
+        camera.position.lerp(camPos, 0.05);
+        orbitControls.target.lerp(camTarget, 0.05);
+      } else {
+        // Far from Earth: wide view showing full trajectory
+        const center = scPos.clone().add(earthPos).multiplyScalar(0.5);
+        const dist = scPos.distanceTo(earthPos);
+        const offset = new THREE.Vector3(0, dist * 0.6, dist * 0.8);
+        camera.position.lerp(center.clone().add(offset), 0.03);
+        orbitControls.target.lerp(center, 0.03);
+      }
+      orbitControls.enabled = false;
+    } else if (camMode === 'earth') {
+      const camPos = new THREE.Vector3(0, earthR * 4, earthR * 6);
+      camera.position.lerp(camPos, 0.05);
+      orbitControls.target.lerp(earthPos, 0.05);
+      orbitControls.enabled = false;
+    } else if (camMode === 'moon') {
+      const camPos = moonPos.clone().add(new THREE.Vector3(0, moonR * 5, moonR * 8));
+      camera.position.lerp(camPos, 0.05);
+      orbitControls.target.lerp(moonPos, 0.05);
+      orbitControls.enabled = false;
+    }
+  }
+
+  // Earth rotation
+  // Earth rotation synced to mission time (ERA)
+  if (horizData) {
+    const jd = horizData.launch_jd + metHours / 24;
+    earthMesh.rotation.y = getERA(jd);
+
+    // KSC marker: ECEF → ICRF (rotate by ERA around Z)
+    const era = getERA(jd);
+    const cosE = Math.cos(era), sinE = Math.sin(era);
+    kscMarker.position.set(
+      KSC_ECEF[0] * cosE - KSC_ECEF[1] * sinE,
+      KSC_ECEF[0] * sinE + KSC_ECEF[1] * cosE,
+      KSC_ECEF[2]
+    );
+  }
+
+  orbitControls.update();
+  renderer.render(scene, camera);
+}
+
+// ============================================================
+// Init
+// ============================================================
+async function init() {
+  await loadTrajectory();
+  buildTrajectoryLine();
+  buildMoonOrbitLine();
+  buildMarkers();
+  metHours = 0;
+  updateFrame(0);
+
+  document.getElementById('loading').classList.add('hidden');
+  animate(performance.now());
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+init();
+</script>
+</body>
+</html>
