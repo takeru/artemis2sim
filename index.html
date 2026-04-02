@@ -58,8 +58,8 @@ canvas{display:block}
 #play-btn{width:36px;height:36px;border-radius:50%;border:1px solid var(--cyan);background:none;color:var(--cyan);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 #play-btn:hover{background:var(--cyan);color:var(--bg)}
 #speed-btn{background:none;border:1px solid var(--muted);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;cursor:pointer;flex-shrink:0;min-width:48px}
-#timeline{flex:1;height:6px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,0.1);border-radius:3px;outline:none;cursor:pointer}
-#timeline::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--cyan);cursor:pointer}
+#timeline{flex:1;height:6px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,0.1);border-radius:3px;outline:none;cursor:pointer;touch-action:none}
+#timeline::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--cyan);cursor:pointer}
 #met-display{font-size:11px;color:var(--muted);flex-shrink:0;min-width:100px;text-align:right}
 
 /* Phase markers on timeline */
@@ -95,10 +95,49 @@ canvas{display:block}
 /* Event banner */
 #event-banner{position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(255,152,0,0.9);color:#000;padding:6px 20px;border-radius:4px;font-size:14px;font-weight:600;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap}
 
-/* Responsive */
+/* Responsive — mobile */
 @media(max-width:768px){
-  #info-panel{top:auto;bottom:120px;left:0;right:0;width:100%;max-height:40vh;border-left:none;border-top:1px solid rgba(255,255,255,0.08)}
+  #header{padding:6px 10px}
+  #header h1{font-size:13px}
+  #header .subtitle{display:none}
+  .cam-btn{padding:2px 5px;font-size:10px}
+  #share-btn{padding:3px 8px;font-size:10px}
+
+  #clock{top:44px;left:10px}
+  #clock-met{font-size:18px}
+  #clock-local{font-size:11px}
+
+  #info-panel{top:auto;bottom:100px;left:0;right:0;width:100%;max-height:30vh;border-left:none;border-top:1px solid rgba(255,255,255,0.08);padding:10px}
+  #info-panel h2{font-size:15px}
+  #info-panel .description{font-size:12px;line-height:1.5;margin-bottom:8px}
+  #tli-control{margin-top:10px;padding:8px}
+
+  #controls{bottom:44px;padding:6px 10px;gap:8px}
+  #play-btn{width:32px;height:32px;font-size:14px}
+  #met-display{font-size:10px;min-width:80px}
+
   #phase-markers{display:none}
+
+  #stats{padding:4px 8px;font-size:10px;flex-wrap:wrap;gap:4px}
+  .stat{min-width:0}
+  .stat-label{font-size:8px}
+  .stat-value{font-size:11px}
+  #gravity-bar{width:50px}
+
+  #event-banner{font-size:12px;padding:4px 12px;top:44px}
+}
+
+/* Responsive — small phone */
+@media(max-width:400px){
+  #header h1{font-size:11px}
+  #cam-btns{gap:1px}
+  .cam-btn{padding:2px 4px;font-size:9px}
+  #clock-met{font-size:15px}
+  #info-panel{max-height:25vh;padding:8px}
+  #info-panel h2{font-size:13px}
+  #info-panel .description{font-size:11px}
+  .stat-value{font-size:10px}
+  #stats{justify-content:space-between}
 }
 
 /* Loading */
@@ -151,9 +190,9 @@ canvas{display:block}
   <div class="glossary" id="glossary" style="display:none"></div>
   <div id="tli-control">
     <label>月への押し出し（TLI）の強さ</label>
-    <input type="range" id="tli-slider" min="70" max="130" value="100" step="1">
-    <div class="tli-value">Δv: <span id="tli-pct">100</span>% （名目値）</div>
-    <div id="tli-result" class="success">正常: 自由帰還軌道</div>
+    <input type="range" id="tli-slider" min="97" max="103" value="100" step="0.1">
+    <div class="tli-value">Δv: <span id="tli-pct">100.0</span>%  <span id="tli-dv-abs"></span></div>
+    <div id="tli-result" class="success">名目軌道（実データ）</div>
   </div>
 </div>
 
@@ -162,13 +201,14 @@ canvas{display:block}
   <div id="help-content">
     <h3>操作方法</h3>
     <dl>
-      <dt>左ドラッグ</dt><dd>回転</dd>
-      <dt>右ドラッグ</dt><dd>平行移動</dd>
-      <dt>スクロール</dt><dd>ズーム</dd>
+      <dt>ドラッグ / 1本指</dt><dd>回転</dd>
+      <dt>右ドラッグ / 2本指ドラッグ</dt><dd>平行移動</dd>
+      <dt>スクロール / ピンチ</dt><dd>ズーム</dd>
       <dt>タイムライン</dt><dd>ミッション時刻を移動</dd>
-      <dt>再生ボタン</dt><dd>アニメーション開始/停止</dd>
+      <dt>▶ ボタン</dt><dd>再生/停止</dd>
       <dt>速度ボタン</dt><dd>再生速度切り替え</dd>
-      <dt>カメラボタン</dt><dd>視点切り替え（自由/宇宙船/地球/月）</dd>
+      <dt>カメラボタン</dt><dd>視点切り替え</dd>
+      <dt>TLIスライダー</dt><dd>噴射量を変えて軌道シミュレーション</dd>
     </dl>
     <p style="font-size:11px;color:var(--muted);margin-top:12px">クリックで閉じる</p>
   </div>
@@ -251,6 +291,8 @@ let horizData = null;
 let trajCurve = null;
 let trajLine = null;
 let camMode = 'free'; // 'free' | 'craft' | 'earth' | 'moon'
+let simLine = null;   // simulated trajectory line
+let simLineMat = null;
 
 // ============================================================
 // Load real trajectory from JPL Horizons data
@@ -286,6 +328,143 @@ function interpAt(metH) {
     dM: a.dM + (b.dM - a.dM) * t,
     met: metH,
   };
+}
+
+// ============================================================
+// Orbit Simulation Engine (JS port of gen_trajectory.py physics)
+// ============================================================
+const MU_EARTH = 398600.4418; // km^3/s^2
+const MU_MOON = 4902.8;       // km^3/s^2
+const KM_PER_UNIT = 3844;
+
+function simRK4(state, dt, moonKm) {
+  // state: [x,y,z,vx,vy,vz] in km, km/s
+  function deriv(s) {
+    const r = Math.sqrt(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
+    const r3 = r*r*r;
+    let ax = -MU_EARTH * s[0] / r3;
+    let ay = -MU_EARTH * s[1] / r3;
+    let az = -MU_EARTH * s[2] / r3;
+    if (moonKm) {
+      const dx = s[0]-moonKm[0], dy = s[1]-moonKm[1], dz = s[2]-moonKm[2];
+      const rm = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      const rm3 = rm*rm*rm;
+      const rm0 = Math.sqrt(moonKm[0]**2 + moonKm[1]**2 + moonKm[2]**2);
+      const rm03 = rm0**3;
+      ax += -MU_MOON * dx/rm3 - MU_MOON * moonKm[0]/rm03;
+      ay += -MU_MOON * dy/rm3 - MU_MOON * moonKm[1]/rm03;
+      az += -MU_MOON * dz/rm3 - MU_MOON * moonKm[2]/rm03;
+    }
+    return [s[3], s[4], s[5], ax, ay, az];
+  }
+  const k1 = deriv(state);
+  const s2 = state.map((v,i) => v + dt/2*k1[i]);
+  const k2 = deriv(s2);
+  const s3 = state.map((v,i) => v + dt/2*k2[i]);
+  const k3 = deriv(s3);
+  const s4 = state.map((v,i) => v + dt*k3[i]);
+  const k4 = deriv(s4);
+  return state.map((v,i) => v + dt/6*(k1[i]+2*k2[i]+2*k3[i]+k4[i]));
+}
+
+// Find TLI point in trajectory data and extract state in km
+function getTLIState() {
+  const TLI_MET = 25.6; // hours
+  const d = interpAt(TLI_MET);
+  const pos = [d.x * KM_PER_UNIT, d.y * KM_PER_UNIT, d.z * KM_PER_UNIT];
+  // Compute velocity from finite difference
+  const d2 = interpAt(TLI_MET + 0.01);
+  const dt = 0.01 * 3600; // seconds
+  const vel = [
+    (d2.x - d.x) * KM_PER_UNIT / dt,
+    (d2.y - d.y) * KM_PER_UNIT / dt,
+    (d2.z - d.z) * KM_PER_UNIT / dt,
+  ];
+  const moonKm = [d.mx * KM_PER_UNIT, d.my * KM_PER_UNIT, d.mz * KM_PER_UNIT];
+  return { pos, vel, moonKm, met: TLI_MET };
+}
+
+// Simulate orbit from TLI with modified Δv
+// Returns { positions: flat array, closestMoonKm, closestMoonMetH, escaped, crashed }
+function simulateFromTLI(dvScale) {
+  const tli = getTLIState();
+  const speed = Math.sqrt(tli.vel[0]**2 + tli.vel[1]**2 + tli.vel[2]**2);
+  const dir = tli.vel.map(v => v / speed);
+
+  const newSpeed = speed * dvScale;
+  let state = [
+    tli.pos[0], tli.pos[1], tli.pos[2],
+    dir[0] * newSpeed, dir[1] * newSpeed, dir[2] * newSpeed
+  ];
+
+  const dtSec = 120;
+  const totalHours = 190;
+  const totalSteps = Math.floor(totalHours * 3600 / dtSec);
+  const sampleEvery = 5;
+
+  const points = [];
+  let closestMoonKm = Infinity;
+  let closestMoonMetH = 0;
+  let crashed = false;
+  let escaped = false;
+
+  for (let step = 0; step <= totalSteps; step++) {
+    const metH = tli.met + step * dtSec / 3600;
+    const dMoon = interpAt(Math.min(metH, horizData.last_met_h));
+    const moonKm = [dMoon.mx * KM_PER_UNIT, dMoon.my * KM_PER_UNIT, dMoon.mz * KM_PER_UNIT];
+
+    // Track closest approach to Moon
+    const dmx = state[0] - moonKm[0], dmy = state[1] - moonKm[1], dmz = state[2] - moonKm[2];
+    const distMoon = Math.sqrt(dmx*dmx + dmy*dmy + dmz*dmz);
+    if (distMoon < closestMoonKm) {
+      closestMoonKm = distMoon;
+      closestMoonMetH = metH;
+    }
+
+    if (step % sampleEvery === 0) {
+      const r = Math.sqrt(state[0]**2 + state[1]**2 + state[2]**2);
+      points.push(state[0]/KM_PER_UNIT, state[1]/KM_PER_UNIT, state[2]/KM_PER_UNIT);
+      if (r < 6378) { crashed = true; break; }
+      if (r > 500000) { escaped = true; break; }
+    }
+
+    state = simRK4(state, dtSec, moonKm);
+  }
+
+  // Check if it returns near Earth
+  const finalR = Math.sqrt(state[0]**2 + state[1]**2 + state[2]**2);
+
+  return { points, closestMoonKm, closestMoonMetH, crashed, escaped, finalR };
+}
+
+// Build/update simulation trajectory line
+function updateSimLine(dvScale) {
+  if (simLine) scene.remove(simLine);
+  // Always simulate (including 100% to show model vs real data difference)
+
+  const result = simulateFromTLI(dvScale);
+  if (result.points.length < 6) return;
+
+  const geo = new LineGeometry();
+  geo.setPositions(result.points);
+
+  // Color: yellow at 100% (model vs real), green if returns, red if crash/escape
+  let color;
+  if (Math.abs(dvScale - 1.0) < 0.0005) color = 0xffff44; // 100%: yellow (model comparison)
+  else if (result.crashed || result.escaped || result.closestMoonKm < 1737) color = 0xff4444;
+  else color = 0x44ff88;
+
+  simLineMat = new LineMaterial({
+    color, transparent: true, opacity: 0.8,
+    linewidth: currentLineWidth,
+    resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
+  });
+
+  simLine = new Line2(geo, simLineMat);
+  simLine.computeLineDistances();
+  scene.add(simLine);
+
+  return result;
 }
 
 // ============================================================
@@ -594,19 +773,43 @@ timeline.addEventListener('input', () => {
   updateFrame(metHours);
 });
 
-// TLI slider — educational "what if" (note: shows info only, real data stays)
+// TLI slider — simulates orbit with modified Δv
 document.getElementById('tli-slider').addEventListener('input', (e) => {
-  const val = parseInt(e.target.value);
-  document.getElementById('tli-pct').textContent = val;
+  const val = parseFloat(e.target.value);
+  document.getElementById('tli-pct').textContent = val.toFixed(1);
   const tli = val / 100;
-  let msg, css;
-  if (tli < 0.82) { msg = '推力不足: 月に届かず地球に落下'; css = 'danger'; }
-  else if (tli < 0.88) { msg = '推力不足: 軌道が不安定'; css = 'danger'; }
-  else if (tli > 1.18) { msg = '推力過大: 宇宙に飛び出す'; css = 'danger'; }
-  else if (tli > 1.12) { msg = '注意: 月に近づきすぎ'; css = 'danger'; }
-  else { msg = '正常: 自由帰還軌道'; css = 'success'; }
+
+  // Show absolute Δv change
+  const nominalSpeed = 10.8; // km/s approximate
+  const diff = (tli - 1) * nominalSpeed;
+  const absEl = document.getElementById('tli-dv-abs');
+  if (Math.abs(diff) > 0.001) {
+    absEl.textContent = `(${diff > 0 ? '+' : ''}${(diff*1000).toFixed(0)} m/s)`;
+  } else {
+    absEl.textContent = '';
+  }
+
   const r = document.getElementById('tli-result');
-  r.textContent = msg; r.className = css;
+  r.textContent = `シミュレーション中...`;
+  r.className = '';
+
+  // Debounce: simulate after slider stops moving
+  clearTimeout(window._simTimeout);
+  window._simTimeout = setTimeout(() => {
+    if (!horizData) return;
+    const result = updateSimLine(tli);
+    if (result) {
+      const moonAlt = Math.max(0, result.closestMoonKm - 1737);
+      const days = (result.closestMoonMetH / 24).toFixed(1);
+      let msg = `月最接近: ${Math.round(moonAlt).toLocaleString()} km（T+${days}日）`;
+      if (result.crashed) msg += ' ⚠ 地球に衝突';
+      else if (result.escaped) msg += ' ⚠ 脱出軌道';
+      else if (result.closestMoonKm < 1737) msg += ' ⚠ 月に衝突';
+      if (Math.abs(val - 100) < 0.05) msg += '\n黄線=簡易モデル / 元の線=実データ';
+      r.textContent = msg;
+      r.className = (result.crashed || result.escaped || result.closestMoonKm < 1737) ? 'danger' : 'success';
+    }
+  }, 200);
 });
 
 window.togglePlay = () => {
@@ -856,6 +1059,8 @@ async function init() {
   buildMarkers();
   metHours = 0;
   updateFrame(0);
+  // Run initial simulation at 100% to show model vs real data
+  updateSimLine(1.0);
 
   document.getElementById('loading').classList.add('hidden');
   animate(performance.now());
