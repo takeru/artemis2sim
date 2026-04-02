@@ -44,8 +44,13 @@ canvas{display:block}
 .glossary dt{color:var(--cyan);font-weight:600;margin-top:4px}
 .glossary dd{color:var(--muted);margin-bottom:4px}
 
+/* TLI Mode Toggle */
+#tli-mode-toggle{margin-top:16px;display:flex;border-radius:6px;overflow:hidden;border:1px solid rgba(255,152,0,0.3)}
+.tli-mode-btn{flex:1;padding:8px 4px;font-size:11px;font-weight:600;border:none;cursor:pointer;text-align:center;transition:background .2s,color .2s;background:transparent;color:var(--muted)}
+.tli-mode-btn.active{background:rgba(255,152,0,0.2);color:var(--amber)}
+.tli-mode-btn:hover:not(.active){background:rgba(255,152,0,0.08);color:var(--text)}
 /* TLI Slider */
-#tli-control{margin-top:16px;padding:12px;background:rgba(255,152,0,0.08);border-radius:6px;border:1px solid rgba(255,152,0,0.2)}
+#tli-control{margin-top:8px;padding:12px;background:rgba(255,152,0,0.08);border-radius:6px;border:1px solid rgba(255,152,0,0.2)}
 #tli-control label{font-size:12px;color:var(--amber);font-weight:600;display:block;margin-bottom:6px}
 #tli-control input[type=range]{width:100%;accent-color:var(--amber)}
 .tli-step{background:none;border:1px solid var(--amber);color:var(--amber);padding:4px 6px;border-radius:3px;font-size:11px;cursor:pointer;font-weight:600;min-width:32px}
@@ -54,6 +59,8 @@ canvas{display:block}
 #tli-result{margin-top:8px;font-size:12px;padding:6px 8px;border-radius:4px}
 #tli-result.success{background:rgba(68,255,136,0.1);color:var(--success)}
 #tli-result.danger{background:rgba(255,68,68,0.1);color:var(--danger)}
+#tli-control.disabled{opacity:0.4;pointer-events:none}
+#tli-control.disabled input,#tli-control.disabled button{cursor:not-allowed}
 
 /* Bottom Controls */
 #controls{position:fixed;bottom:60px;left:0;right:0;z-index:10;display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--panel);backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,0.08)}
@@ -199,23 +206,27 @@ canvas{display:block}
   <span class="detail-toggle" id="detail-toggle" onclick="toggleDetail()">もっと詳しく ▼</span>
   <div class="detail-content" id="detail-content"></div>
   <div class="glossary" id="glossary" style="display:none"></div>
-  <div id="tli-control">
+  <div id="tli-mode-toggle">
+    <button class="tli-mode-btn active" data-mode="real" onclick="setTliMode('real')">実際の軌道</button>
+    <button class="tli-mode-btn" data-mode="sim" onclick="setTliMode('sim')">TLIシミュレーション</button>
+  </div>
+  <div id="tli-control" class="disabled">
     <label>TLI 速度</label>
     <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-      <button class="tli-step" onclick="adjustDv(-10)">-10</button>
       <button class="tli-step" onclick="adjustDv(-1)">-1</button>
+      <button class="tli-step" onclick="adjustDv(-0.1)">-.1</button>
       <div style="position:relative;flex:1">
-        <input type="number" id="tli-dv-input" value="10645" step="1" style="width:100%;background:var(--bg);border:1px solid var(--amber);color:var(--text);padding:6px 40px 6px 8px;border-radius:4px;font-size:16px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums">
+        <input type="number" id="tli-dv-input" value="10645.0" step="0.1" style="width:100%;background:var(--bg);border:1px solid var(--amber);color:var(--text);padding:6px 40px 6px 8px;border-radius:4px;font-size:16px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums">
         <span style="position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:12px;pointer-events:none">m/s</span>
       </div>
+      <button class="tli-step" onclick="adjustDv(+0.1)">+.1</button>
       <button class="tli-step" onclick="adjustDv(+1)">+1</button>
-      <button class="tli-step" onclick="adjustDv(+10)">+10</button>
     </div>
-    <input type="range" id="tli-slider" min="10300" max="11100" value="10645" step="1" style="width:100%;accent-color:var(--amber)">
+    <input type="range" id="tli-slider" min="10150" max="10800" value="10645.0" step="0.1" style="width:100%;accent-color:var(--amber)">
     <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-top:2px;padding:0 2px">
-      <span>月に届かない</span>
+      <span>◀ TLIなし ~10,152</span>
       <span style="color:var(--amber)">▲ 名目 10,645</span>
-      <span>脱出 10,966 ▶</span>
+      <span>10,800 ▶</span>
     </div>
     <div id="tli-result" class="success">名目軌道（実データ）</div>
   </div>
@@ -390,9 +401,29 @@ function interpAt(metH) {
 // ============================================================
 const MU_EARTH = 398600.4418; // km^3/s^2
 const MU_MOON = 4902.8;       // km^3/s^2
+const MU_SUN = 132712440018;  // km^3/s^2
+const RE = 6378.137;          // Earth equatorial radius km
+const J2 = 1.08263e-3;        // Earth J2 oblateness
 const KM_PER_UNIT = 3844;
 
-function simRK4(state, dt, moonKm) {
+// Geocentric sun position (ICRF, km) at given Julian Date
+// Simple low-precision solar ephemeris (error < 0.01 AU over 9 days)
+function sunPositionKm(jd) {
+  const T = (jd - 2451545.0) / 36525; // Julian centuries from J2000
+  const M = (357.5291 + 35999.0503 * T) * Math.PI / 180; // mean anomaly
+  const L0 = (280.4665 + 36000.7698 * T) * Math.PI / 180; // mean longitude
+  const C = (1.9146 * Math.sin(M) + 0.0200 * Math.sin(2*M)) * Math.PI / 180; // equation of center
+  const lon = L0 + C; // ecliptic longitude
+  const R = 149597870.7 * (1.00014 - 0.01671 * Math.cos(M) - 0.00014 * Math.cos(2*M)); // distance km
+  // Ecliptic → ICRF (obliquity ε = 23.4393°)
+  const eps = 23.4393 * Math.PI / 180;
+  const cosE = Math.cos(eps), sinE = Math.sin(eps);
+  const xs = R * Math.cos(lon);
+  const ys_ecl = R * Math.sin(lon);
+  return [xs, ys_ecl * cosE, ys_ecl * sinE];
+}
+
+function simRK4(state, dt, moonKm, sunKm) {
   // state: [x,y,z,vx,vy,vz] in km, km/s
   function deriv(s) {
     const r = Math.sqrt(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
@@ -400,6 +431,14 @@ function simRK4(state, dt, moonKm) {
     let ax = -MU_EARTH * s[0] / r3;
     let ay = -MU_EARTH * s[1] / r3;
     let az = -MU_EARTH * s[2] / r3;
+    // J2 perturbation (ICRF z-axis ≈ Earth spin axis)
+    const r2 = r * r;
+    const r5 = r2 * r3;
+    const z2r2 = s[2] * s[2] / r2;
+    const j2f = 1.5 * J2 * MU_EARTH * RE * RE / r5;
+    ax += j2f * s[0] * (5 * z2r2 - 1);
+    ay += j2f * s[1] * (5 * z2r2 - 1);
+    az += j2f * s[2] * (5 * z2r2 - 3);
     if (moonKm) {
       const dx = s[0]-moonKm[0], dy = s[1]-moonKm[1], dz = s[2]-moonKm[2];
       const rm = Math.sqrt(dx*dx + dy*dy + dz*dz);
@@ -409,6 +448,16 @@ function simRK4(state, dt, moonKm) {
       ax += -MU_MOON * dx/rm3 - MU_MOON * moonKm[0]/rm03;
       ay += -MU_MOON * dy/rm3 - MU_MOON * moonKm[1]/rm03;
       az += -MU_MOON * dz/rm3 - MU_MOON * moonKm[2]/rm03;
+    }
+    if (sunKm) {
+      const dx = s[0]-sunKm[0], dy = s[1]-sunKm[1], dz = s[2]-sunKm[2];
+      const rs = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      const rs3 = rs*rs*rs;
+      const rs0 = Math.sqrt(sunKm[0]**2 + sunKm[1]**2 + sunKm[2]**2);
+      const rs03 = rs0**3;
+      ax += -MU_SUN * dx/rs3 - MU_SUN * sunKm[0]/rs03;
+      ay += -MU_SUN * dy/rs3 - MU_SUN * sunKm[1]/rs03;
+      az += -MU_SUN * dz/rs3 - MU_SUN * sunKm[2]/rs03;
     }
     return [s[3], s[4], s[5], ax, ay, az];
   }
@@ -422,26 +471,31 @@ function simRK4(state, dt, moonKm) {
   return state.map((v,i) => v + dt/6*(k1[i]+2*k2[i]+2*k3[i]+k4[i]));
 }
 
-// Find TLI point in trajectory data and extract state in km
+// Find post-TLI state in trajectory data and extract state in km
+// TLI burn (ESM AJ10) occurs around MET 25.4h — we use post-burn state
 function getTLIState() {
-  // Find peak speed near perigee (MET 24-26h) = TLI point
   const pts = horizData.points;
+  // Find first stable post-burn point: MET >= 25.5h with velocity data
   let best = null;
   for (const p of pts) {
-    if (p.met >= 24 && p.met <= 26 && p.vx !== undefined) {
-      if (!best || p.spd > best.spd) best = p;
-    }
+    if (p.met >= 25.5 && p.vx !== undefined) { best = p; break; }
   }
   if (!best) {
-    // Fallback to MET 25.0
     best = pts.find(p => p.met >= 25.0 && p.vx !== undefined) || pts[Math.floor(pts.length/2)];
   }
+  // Also find perigee (peak speed) for Δv scaling reference
+  let perigee = null;
+  for (const p of pts) {
+    if (p.met >= 24 && p.met <= 26 && p.vx !== undefined) {
+      if (!perigee || p.spd > perigee.spd) perigee = p;
+    }
+  }
   const pos = [best.x * KM_PER_UNIT, best.y * KM_PER_UNIT, best.z * KM_PER_UNIT];
-  // Use Horizons velocity vectors directly (km/s)
   const vel = [best.vx, best.vy, best.vz];
   const moonKm = [best.mx * KM_PER_UNIT, best.my * KM_PER_UNIT, best.mz * KM_PER_UNIT];
-  console.log(`TLI state: MET=${best.met}h, speed=${best.spd} km/s, vel=[${vel.map(v=>v.toFixed(3))}]`);
-  return { pos, vel, moonKm, met: best.met };
+  const speed = Math.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2);
+  console.log(`TLI state: MET=${best.met}h, speed=${speed.toFixed(3)} km/s (post-burn), perigee_spd=${perigee?.spd.toFixed(3)} km/s`);
+  return { pos, vel, moonKm, met: best.met, perigeeSpd: perigee ? perigee.spd : speed };
 }
 
 // Simulate orbit from TLI with modified Δv
@@ -457,9 +511,9 @@ function simulateFromTLI(dvScale) {
     dir[0] * newSpeed, dir[1] * newSpeed, dir[2] * newSpeed
   ];
 
-  const dtSec = 120;
-  const nominalHours = 190;    // nominal mission duration after TLI
-  const extendedHours = 400;   // extended simulation
+  const dtSec = 30;
+  const nominalHours = horizData.last_met_h - tli.met; // match Horizons data end
+  const extendedHours = nominalHours + 200; // extended simulation
   const totalSteps = Math.floor(extendedHours * 3600 / dtSec);
   const sampleEvery = 5;
 
@@ -470,10 +524,13 @@ function simulateFromTLI(dvScale) {
   let crashed = false;
   let escaped = false;
 
+  const launchJD = horizData.launch_jd;
+
   for (let step = 0; step <= totalSteps; step++) {
     const metH = tli.met + step * dtSec / 3600;
     const dMoon = interpAt(Math.min(metH, horizData.last_met_h));
     const moonKm = [dMoon.mx * KM_PER_UNIT, dMoon.my * KM_PER_UNIT, dMoon.mz * KM_PER_UNIT];
+    const sunKm = sunPositionKm(launchJD + metH / 24);
 
     const dmx = state[0] - moonKm[0], dmy = state[1] - moonKm[1], dmz = state[2] - moonKm[2];
     const distMoon = Math.sqrt(dmx*dmx + dmy*dmy + dmz*dmz);
@@ -497,7 +554,7 @@ function simulateFromTLI(dvScale) {
       if (r > 600000) { escaped = true; break; }
     }
 
-    state = simRK4(state, dtSec, moonKm);
+    state = simRK4(state, dtSec, moonKm, sunKm);
   }
 
   const finalR = Math.sqrt(state[0]**2 + state[1]**2 + state[2]**2);
@@ -549,6 +606,12 @@ function updateSimLine(dvScale) {
     simLineExt = new Line2(geo, simLineExtMat);
     simLineExt.computeLineDistances();
     scene.add(simLineExt);
+  }
+
+  // Hide sim lines in real mode
+  if (tliMode === 'real') {
+    if (simLine) simLine.visible = false;
+    if (simLineExt) simLineExt.visible = false;
   }
 
   return result;
@@ -676,7 +739,7 @@ moonGroup.add(moonMesh);
 
 // Moon locator ring (visible when far from camera)
 const moonRingGeo = new THREE.RingGeometry(1.5, 1.7, 64);
-const moonRingMat = new THREE.MeshBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0, side: THREE.DoubleSide });
+const moonRingMat = new THREE.MeshBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0, side: THREE.DoubleSide });
 const moonRing = new THREE.Mesh(moonRingGeo, moonRingMat);
 moonGroup.add(moonRing);
 
@@ -795,18 +858,19 @@ function buildEventMarkers() {
   });
 }
 
+let moonOrbitMat = null;
 function buildMoonOrbitLine() {
   if (moonOrbitLine) scene.remove(moonOrbitLine);
   const pts = horizData.points;
-  // Sample moon positions (every 10th point to keep it light)
   const positions = [];
   for (let i = 0; i < pts.length; i += 10) {
     positions.push(new THREE.Vector3(pts[i].mx, pts[i].my, pts[i].mz));
   }
   const geo = new THREE.BufferGeometry().setFromPoints(positions);
-  moonOrbitLine = new THREE.Line(geo, new THREE.LineBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.08
-  }));
+  moonOrbitMat = new THREE.LineBasicMaterial({
+    color: 0xffdd44, transparent: true, opacity: 0.15
+  });
+  moonOrbitLine = new THREE.Line(geo, moonOrbitMat);
   scene.add(moonOrbitLine);
 }
 
@@ -945,14 +1009,14 @@ const explanations = [
   },
   {
     title: 'チェックアウト周回',
-    desc: 'T+3:26でICPS分離。約70分間の近接運用デモの後、約23.5時間かけて地球を1周。遠地点70,000kmまで離れ、近地点に戻ってくる。',
+    desc: 'T+3:24でICPS分離。約70分間の近接運用デモの後、約23.5時間かけて地球を1周。遠地点70,000kmまで離れ、近地点に戻ってくる。',
     detail: 'クルーがOrionを手動操縦してICPSの周囲を飛行（近接運用デモ）。その後、Orion ESMのAJ10エンジンで近地点上昇バーン（T+~12h）を行い、TLIに備える。',
     glossary: { '近接運用デモ': 'OrionがICPSの近くで手動操縦する実証試験。将来のドッキングに向けた練習。', 'ESM': '欧州サービスモジュール。Orionの推進・電力・熱制御を担当。' }
   },
   {
     title: 'TLI — 月遷移噴射',
     desc: 'ミッション最大の瞬間。T+25h、Orion ESMのAJ10エンジンがチェックアウト軌道の近地点（高度約190km）で噴射し、月への自由帰還軌道に乗る。',
-    detail: 'TLIはICPSではなくOrion自身のESMが実行。近地点での速度は約10,650 m/s。地球脱出速度（約10,970 m/s）との差はわずか約320 m/s。この速度差が「月まで行って帰ってくる」と「宇宙に飛び出す」の境目。',
+    detail: 'TLIはICPSではなくOrion自身のESMが実行。近地点での速度は約10,650 m/s。地球脱出速度（約11,020 m/s）との差はわずか約370 m/s。この速度差が「月まで行って帰ってくる」と「宇宙に飛び出す」の境目。',
     glossary: { 'TLI': 'Trans-Lunar Injection。チェックアウト軌道から月行きに切り替えるバーン。', '自由帰還軌道': '月の重力だけで自然に地球へ戻れる軌道。追加バーンなしで帰還可能。' }
   },
   {
@@ -963,7 +1027,7 @@ const explanations = [
   },
   {
     title: '月フライバイ',
-    desc: 'ミッション最大の見どころ。月の裏側を月面上約6,500kmで通過。月の重力で進路を曲げてもらい、地球へ帰る軌道に乗る。裏側通過中は地球との通信が途切れる。',
+    desc: 'ミッション最大の見どころ。月の裏側を月面上約6,600kmで通過。月の重力で進路を曲げてもらい、地球へ帰る軌道に乗る。裏側通過中は地球との通信が途切れる。',
     detail: '月の重力が宇宙船の進路を曲げる「重力アシスト」。月の質量、宇宙船の速度、最接近距離の3つで曲がり角が決まる。アルテミス2はこの曲がりで自然に地球に戻れる自由帰還軌道を使っている。アポロ13号も緊急時にこの性質で帰還した。',
     glossary: { 'フライバイ': '天体の近くを通り、重力で進路を変えること。燃料ゼロで方向転換。', '通信断': '月が地球と宇宙船の間に入り、電波が遮られる状態。' }
   },
@@ -975,7 +1039,7 @@ const explanations = [
   },
   {
     title: '再突入・着水',
-    desc: '秒速約11kmで大気圏に突入。ヒートシールドが約2,800℃の加熱から宇宙船を守る。パラシュートが開き、太平洋に着水。約10日間のミッション完了。',
+    desc: '秒速約11kmで大気圏に突入。ヒートシールドが約2,800℃の加熱から宇宙船を守る。パラシュートが開き、太平洋に着水。約9日間のミッション完了。',
     detail: '再突入は「スキップ・エントリー」方式。一度大気で減速した後、少し跳ね上がってから再び降下。加熱ピークを分散し着水地点を精密に制御する。Artemis I（無人）で検証済みの方式。',
     glossary: { 'ヒートシールド': '再突入時の高温から宇宙船を守る盾。AVCOAT素材。', 'スキップ・エントリー': '大気で一度バウンドしてから着水する方式。着水精度が高い。' }
   },
@@ -1039,22 +1103,48 @@ timeline.addEventListener('input', () => {
 const tliInput = document.getElementById('tli-dv-input');
 const tliSlider = document.getElementById('tli-slider');
 const TLI_NOMINAL = 10645; // m/s (actual peak speed at TLI perigee from Horizons data)
+let tliMode = 'real'; // 'real' or 'sim'
 
-function runTliSim(speedMs) {
-  speedMs = Math.max(10600, Math.min(11200, Math.round(speedMs)));
-  tliInput.value = speedMs;
+window.setTliMode = (mode) => {
+  tliMode = mode;
+  const btns = document.querySelectorAll('.tli-mode-btn');
+  btns.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  const ctrl = document.getElementById('tli-control');
+  if (mode === 'real') {
+    ctrl.classList.add('disabled');
+    // Hide sim lines, show real trajectory at full opacity
+    if (simLine) simLine.visible = false;
+    if (simLineExt) simLineExt.visible = false;
+    if (trajLineMat) trajLineMat.opacity = 0.6;
+    // Reset input to nominal
+    tliInput.value = TLI_NOMINAL;
+    tliSlider.value = TLI_NOMINAL;
+    const r = document.getElementById('tli-result');
+    r.textContent = '名目軌道（実データ）';
+    r.className = 'success';
+  } else {
+    ctrl.classList.remove('disabled');
+    // Show sim lines, dim real trajectory
+    if (simLine) simLine.visible = true;
+    if (simLineExt) simLineExt.visible = true;
+    if (trajLineMat) trajLineMat.opacity = 0.3;
+    // Run sim at current value
+    runTliSim(parseFloat(tliInput.value) || TLI_NOMINAL);
+  }
+};
+
+function runTliSim(speedMs, immediate) {
+  speedMs = Math.max(10150, Math.min(10800, Math.round(speedMs * 10) / 10));
+  tliInput.value = speedMs.toFixed(1);
   tliSlider.value = speedMs;
 
   const dvScale = speedMs / TLI_NOMINAL;
-  const diff = speedMs - TLI_NOMINAL;
-  const diffStr = diff >= 0 ? `+${diff}` : `${diff}`;
+  const diff = Math.round((speedMs - TLI_NOMINAL) * 10) / 10;
+  const diffStr = diff >= 0 ? `+${diff.toFixed(1)}` : diff.toFixed(1);
 
   const r = document.getElementById('tli-result');
-  r.textContent = `${speedMs.toLocaleString()} m/s (${diffStr}) シミュレーション中...`;
-  r.className = '';
 
-  clearTimeout(window._simTimeout);
-  window._simTimeout = setTimeout(() => {
+  function doSim() {
     if (!horizData) return;
     const result = updateSimLine(dvScale);
     if (result) {
@@ -1065,22 +1155,31 @@ function runTliSim(speedMs) {
       else if (result.escaped) msg += '⚠ 脱出軌道（帰還不能）';
       else if (result.closestMoonKm < 1737) msg += '⚠ 月に衝突';
       else msg += `月最接近 ${Math.round(moonAlt).toLocaleString()} km（T+${days}日）`;
-      if (diff === 0) msg += '\n黄線=簡易モデル / 元の線=実データ';
+      if (Math.abs(diff) < 0.05) msg += '\n黄線=簡易モデル / 元の線=実データ';
       r.textContent = msg;
       r.className = (result.crashed || result.escaped || result.closestMoonKm < 1737) ? 'danger' : 'success';
     }
-  }, 200);
+  }
+
+  clearTimeout(window._simTimeout);
+  if (immediate) {
+    doSim();
+  } else {
+    r.textContent = `${speedMs.toLocaleString()} m/s (${diffStr}) シミュレーション中...`;
+    r.className = '';
+    window._simTimeout = setTimeout(doSim, 200);
+  }
 }
 
-tliSlider.addEventListener('input', () => runTliSim(parseInt(tliSlider.value)));
-tliInput.addEventListener('change', () => runTliSim(parseInt(tliInput.value) || TLI_NOMINAL));
+tliSlider.addEventListener('input', () => runTliSim(parseFloat(tliSlider.value), true));
+tliInput.addEventListener('change', () => runTliSim(parseFloat(tliInput.value) || TLI_NOMINAL));
 tliInput.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowUp') { e.preventDefault(); runTliSim((parseInt(tliInput.value) || TLI_NOMINAL) + 1); }
-  if (e.key === 'ArrowDown') { e.preventDefault(); runTliSim((parseInt(tliInput.value) || TLI_NOMINAL) - 1); }
+  if (e.key === 'ArrowUp') { e.preventDefault(); runTliSim((parseFloat(tliInput.value) || TLI_NOMINAL) + 0.1); }
+  if (e.key === 'ArrowDown') { e.preventDefault(); runTliSim((parseFloat(tliInput.value) || TLI_NOMINAL) - 0.1); }
 });
 
 window.adjustDv = (delta) => {
-  runTliSim((parseInt(tliInput.value) || TLI_NOMINAL) + delta);
+  runTliSim((parseFloat(tliInput.value) || TLI_NOMINAL) + delta);
 };
 
 window.togglePlay = () => {
@@ -1299,6 +1398,10 @@ function animate(now) {
   scGlow.scale.setScalar(scScale);
 
   moonRing.lookAt(camera.position);
+  // Moon orbit line pulse
+  if (moonOrbitMat) {
+    moonOrbitMat.opacity = 0.08 + 0.07 * Math.sin(now * 0.002);
+  }
   // Event markers: face camera + scale with distance
   for (let i = 0; i < eventMarkersGroup.children.length; i += 2) {
     const marker = eventMarkersGroup.children[i];
@@ -1313,7 +1416,8 @@ function animate(now) {
 
   // Moon ring: visible when camera is far, fades when close
   const moonCamDist = camera.position.distanceTo(moonGroup.position);
-  moonRingMat.opacity = Math.min(0.5, Math.max(0, (moonCamDist - 10) / 20));
+  const moonBaseOpacity = Math.min(0.8, Math.max(0, (moonCamDist - 10) / 20));
+  moonRingMat.opacity = moonBaseOpacity * (0.6 + 0.4 * Math.sin(now * 0.002));
 
   // Glow: constant max brightness
   scGlow.material.opacity = 0.8;
@@ -1394,8 +1498,10 @@ async function init() {
   buildMarkers();
   metHours = 0;
   updateFrame(0);
-  // Run initial simulation at nominal speed
+  // Pre-compute sim at nominal speed (hidden in real mode)
   runTliSim(TLI_NOMINAL);
+  // Start in real trajectory mode
+  setTliMode('real');
 
   document.getElementById('loading').classList.add('hidden');
   animate(performance.now());
