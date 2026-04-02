@@ -181,6 +181,7 @@ canvas{display:block}
       <button class="cam-btn" data-cam="moon" onclick="setCam('moon')">月</button>
     </div>
     <button id="grid-btn" class="cam-btn active" onclick="toggleGrid()">格子</button>
+    <button id="marker-btn" class="cam-btn active" onclick="toggleMarkers()">イベント</button>
     <button onclick="document.getElementById('help-overlay').style.display='flex'" style="background:none;border:1px solid var(--muted);color:var(--muted);width:24px;height:24px;border-radius:50%;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center">?</button>
     <select id="line-width" onchange="setLineWidth(this.value)" style="background:var(--bg);border:1px solid var(--muted);color:var(--text);padding:3px 6px;border-radius:3px;font-size:11px">
       <option value="1">細</option>
@@ -688,8 +689,19 @@ scene.add(rotHelpers);
 
 window.toggleGrid = () => {
   rotHelpers.visible = !rotHelpers.visible;
-  const btn = document.getElementById('grid-btn');
-  btn.classList.toggle('active', rotHelpers.visible);
+  document.getElementById('grid-btn').classList.toggle('active', rotHelpers.visible);
+};
+
+let markersVisible = true;
+window.toggleMarkers = () => {
+  markersVisible = !markersVisible;
+  document.getElementById('marker-btn').classList.toggle('active', markersVisible);
+  eventMarkersGroup.children.forEach(c => {
+    if (c.material) {
+      c.material.opacity = markersVisible ? (c.material._baseOpacity ?? 1) : 0.1;
+      c.material.transparent = true;
+    }
+  });
 };
 
 // XYZ axes at Earth (R=red/X, G=green/Y, B=blue/Z)
@@ -762,19 +774,21 @@ function buildEventMarkers() {
   if (!horizData || !horizData.events) return;
 
   const markerGeo = new THREE.SphereGeometry(0.4, 8, 8);
-  const markerMat = new THREE.MeshBasicMaterial({ color: 0xff9800 });
 
   horizData.events.forEach(ev => {
     const d = interpAt(ev.met);
     if (!d) return;
-    const marker = new THREE.Mesh(markerGeo, markerMat);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xff9800, transparent: true, opacity: 1.0 });
+    mat._baseOpacity = 1.0;
+    const marker = new THREE.Mesh(markerGeo, mat);
     marker.position.set(d.x, d.y, d.z);
     eventMarkersGroup.add(marker);
 
-    // Small ring around marker for visibility
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xff9800, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
+    ringMat._baseOpacity = 0.5;
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.6, 0.7, 16),
-      new THREE.MeshBasicMaterial({ color: 0xff9800, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+      ringMat
     );
     ring.position.copy(marker.position);
     eventMarkersGroup.add(ring);
@@ -802,7 +816,7 @@ const scGroup = new THREE.Group();
 
 // Bright dot (tiny)
 const scDot = new THREE.Mesh(
-  new THREE.SphereGeometry(0.03, 8, 8),
+  new THREE.SphereGeometry(0.09, 8, 8),
   new THREE.MeshBasicMaterial({ color: 0xffffff })
 );
 scGroup.add(scDot);
