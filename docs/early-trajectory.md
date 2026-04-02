@@ -198,3 +198,55 @@ cost = position_error_km + velocity_error_km_s * 1000
 優先度低:
 - **近地点引数（M_offset）の最適化**: 10番目のパラメータとして追加可能だが、現状0°で収束しており効果は限定的
 - **太陽重力の追加**: 3.4hの伝播で0.04kmの効果。無視できる
+
+---
+
+## 公開値との検証結果（2026-04-02時点）
+
+### 合成区間（Phase 0〜3, T+0 → T+3.4h）
+
+最適化でHorizonsデータのT+3.4h地点に0km/0°で接続するが、
+途中の軌道パラメータは公開値と乖離している。
+これは打ち上げ上昇をケプラー楕円で近似していることの限界。
+
+| 項目 | シミュレータ | 公開値 | ソース | 判定 |
+|------|------------|--------|--------|------|
+| 投入軌道 近地点 | 72km | 27km | SpaceNews | ❌ +45km |
+| 投入軌道 遠地点 | 3,526km | 2,222km | SpaceNews | ❌ +1,304km |
+| burn1後 近地点 | -8km | 185km | CBS, SpaceNews | ❌ 非物理的 |
+| burn1後 遠地点 | 3,397km | 2,222km | 推定 | ❌ +1,175km |
+| burn2時の高度 | -5km | ~185km | 推定 | ❌ 非物理的 |
+| T+3.4h接続 | 0km / 0° | — | — | ✅ |
+
+原因: 最適化パラメータ（特に投入軌道近地点-200km）が非物理的な値に収束し、
+途中経路が実際とずれる。ただし終点（Horizonsデータとの接続）は正確。
+
+### Horizonsデータ区間（Phase 4以降, T+3.4h →）
+
+JPL Horizonsの実飛行データをそのまま使用。公開値との整合性を検証済み。
+
+| 項目 | シミュレータ | 公開値 | ソース | 判定 |
+|------|------------|--------|--------|------|
+| チェックアウト軌道 遠地点 | 70,160km | ~70,000km (43,760 miles) | CBS News | ✅ |
+| TLI直前の近地点高度 | 189km (MET 25.27h) | ~186km (115 miles) | SpaceNews, CBS | ✅ |
+| TLIピーク速度 | 10.648 km/s | — | — | 妥当 |
+| 月最接近（月面上高度） | 6,588km | ~6,513km (4,047 miles) | Planetary Society, NASA | ✅ |
+| 月最接近タイミング | MET 120.4h (Day 5.0) | Day 6 (4月6日) | search結果 | ✅ ※Day数え方の差 |
+| Horizonsデータ終了 | MET 216.4h, 18,424km | 着水 MET 217.8h | NASA press kit | ⚠ データ不足 |
+
+注記:
+- 月最接近のDay表記: MET 120.4h = 打ち上げから5.0日後。NASAの「Day 6」は打ち上げ日をDay 1と数えるため一致。
+- Horizonsデータは着水（MET 217.8h）の1.4h前で終了。再突入・着水のデータが不足。
+
+### 検証に使用したソース
+
+- SpaceNews: https://spacenews.com/artemis-2s-nearly-10-day-flight-around-the-moon/
+  - 投入軌道 27×2222km、近地点上昇→185km
+- CBS News: https://www.cbsnews.com/live-updates/nasa-artemis-ii-launch/
+  - 遠地点43,760 miles、ICPS分離10:01 PM EDT、バーン時刻
+- NASA blog: https://www.nasa.gov/blogs/missions/2026/04/01/live-artemis-ii-launch-day-updates/
+  - MECO MET+00:08:14、ソーラーパネル展開
+- L3Harris: https://www.l3harris.com/newsroom/editorial/2026/03/rl10-and-orion-main-engine-are-key-nasas-historic-artemis-ii-journey
+  - TLIはESM AJ10が実行、ICPSではない
+- NASA prox ops blog: https://www.nasa.gov/blogs/missions/2026/04/01/artemis-ii-flight-update-proximity-operations-complete-perigee-raise-burn-up-next/
+  - 近接運用デモ後にESM近地点上昇が翌日予定
