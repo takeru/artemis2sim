@@ -6,7 +6,7 @@ Usage:
 """
 import json, re, math, sys
 from datetime import datetime, timezone
-from scipy.optimize import minimize
+from scipy.optimize import least_squares, minimize
 from numba import njit
 
 def parse_horizons(filepath):
@@ -521,6 +521,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         meco_state = np.array(st_ins, dtype=np.float64)
         v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1), scale_vec(r_b1_hat, dv1r)))
         st = np.array(list(r_b1) + v_after, dtype=np.float64)
+        burn1_after_state = st.copy()
         burn2_start_h = b2h - BURN2_DURATION_SEC / 7200.0
         burn2_end_h = b2h + BURN2_DURATION_SEC / 7200.0
         # Segment 1: burn1 → burn2 start
@@ -542,6 +543,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
             'vel': st[3:].tolist(),
             'mid_state': mid_state,
             'post_burn2_state': post_burn2_state,
+            'burn1_after_state': burn1_after_state,
             'meco_state': meco_state,
             'min_alt_phase1': min_alt_phase1,
         }
@@ -550,11 +552,27 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         result = evaluate_trajectory(dv1, dv2, dv1r, dv2r, azimuth, b1h, b2h)
         return result['pos'], result['vel']
 
+    def propagate_segment_state(state, start_h, end_h):
+        state_np = np.array(state, dtype=np.float64)
+        if end_h <= start_h:
+            return state_np.copy()
+        return _propagate_segment_linear_moon(
+            state_np, dt, (end_h - start_h) * 3600, moon_np, moon_vel_np, start_h * 3600.0, moon_ref_sec
+        )
+
+    def propagate_burn_state(state, burn_center_h, dv_prograde, dv_radial):
+        state_np = np.array(state, dtype=np.float64)
+        burn_start_h = burn_center_h - BURN2_DURATION_SEC / 7200.0
+        return _propagate_burn_linear_moon(
+            state_np, dt, BURN2_DURATION_SEC, dv_prograde, dv_radial,
+            moon_np, moon_vel_np, burn_start_h * 3600.0, moon_ref_sec
+        )
+
     # 9 params: Δv (4) + azimuth + burn times (2) + insertion orbit adjustment (2)
     # Insertion orbit starts at 27×2222km, allowed ±10% adjustment
     x0 = [dv1_nom, dv2_nom, 0, 0, 0, BURN1_H, BURN2_H, 1.0, 1.0]
     bounds = [
-        (-0.5, 1.0),            # dv1
+        (-0.08, 0.12),          # dv1
         (1.5, 3.5),             # dv2
         (-0.08, 0.08),          # dv1r
         (-0.08, 0.08),          # dv2r
@@ -562,7 +580,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         (0.6, 1.1),             # burn1 effective time
         (1.5, 2.2),             # burn2 effective time
         (0.85, 1.15),           # ins_peri scale (±15%)
-        (0.85, 1.15),           # ins_apo scale (±15%)
+        (0.9995, 1.0005),       # ins_apo effectively fixed at public 2222 km
     ]
 
     def cost_bounded(x):
@@ -647,17 +665,304 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     result = minimize(cost_vel_focus, list(res1.x), method='Nelder-Mead',
                       options={'maxiter': 20000, 'xatol': 1e-7, 'fatol': 0.001, 'adaptive': True})
 
-    dv1o, dv2o, dv1ro, dv2ro, az_opt, b1h_opt, b2h_opt, peri_scale, apo_scale = result.x
+    def candidate_metrics(x):
+        for i, (lo, hi) in enumerate(bounds):
+            if x[i] < lo or x[i] > hi:
+                return None
+        try:
+            nonlocal a_ins, e_ins, omega_ins
+            ip = INS_PERI * x[7] + R_E * (1 - x[7])
+            ia = INS_APO * x[8] + R_E * (1 - x[8])
+            a_ins = (ip + ia) / 2
+            e_ins = (ia - ip) / (ia + ip)
+            omega_ins = math.sqrt(MU / a_ins**3)
+            traj = evaluate_trajectory(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+            pos, vel = traj['pos'], traj['vel']
+            pe = mag([pos[i] - r_target[i] for i in range(3)])
+            ve = mag([vel[i] - v_target[i] for i in range(3)])
+            mid_peri, mid_apo = orbital_altitudes(traj['mid_state'])
+            fin_peri, fin_apo = orbital_altitudes(traj['post_burn2_state'])
+            meco_alt = mag(traj['meco_state'][:3].tolist()) - R_E
+            return {
+                'pe': pe,
+                've': ve,
+                'ins_peri': ip - R_E,
+                'ins_apo': ia - R_E,
+                'mid_peri': mid_peri,
+                'mid_apo': mid_apo,
+                'fin_peri': fin_peri,
+                'fin_apo': fin_apo,
+                'meco_alt': meco_alt,
+                'min_alt_phase1': traj['min_alt_phase1'],
+            }
+        except:
+            return None
+        finally:
+            a_ins = (INS_PERI + INS_APO) / 2
+            e_ins = (INS_APO - INS_PERI) / (INS_APO + INS_PERI)
+            omega_ins = math.sqrt(MU / a_ins**3)
+
+    def constrained_objective(x):
+        m = candidate_metrics(x)
+        if m is None:
+            return 1e12
+        radial_pen = (x[2] / 0.01) ** 2 + (x[3] / 0.01) ** 2
+        time_pen = ((x[5] - 49.0 / 60.0) / 0.08) ** 2 + ((x[6] - 108.0 / 60.0) / 0.08) ** 2
+        orbit_soft = (
+            ((m['ins_peri'] - 27.0) / 5.0) ** 2 +
+            ((m['ins_apo'] - 2222.0) / 80.0) ** 2 +
+            ((m['mid_peri'] - 185.0) / 20.0) ** 2 +
+            ((m['mid_apo'] - 2222.0) / 120.0) ** 2 +
+            ((m['fin_peri'] - 185.0) / 40.0) ** 2 +
+            ((m['fin_apo'] - 70000.0) / 4000.0) ** 2
+        )
+        return m['pe'] + m['ve'] * 1500 + 400 * radial_pen + 80 * time_pen + 50 * orbit_soft
+
+    def make_ineq(metric_name, lo=None, hi=None):
+        def fn(x):
+            m = candidate_metrics(x)
+            if m is None:
+                return -1e9
+            v = m[metric_name]
+            if lo is not None and hi is None:
+                return v - lo
+            if hi is not None and lo is None:
+                return hi - v
+            return min(v - lo, hi - v)
+        return fn
+
+    constraints = [
+        {'type': 'ineq', 'fun': make_ineq('min_alt_phase1', lo=0.0)},
+        {'type': 'ineq', 'fun': make_ineq('meco_alt', lo=0.0)},
+        {'type': 'ineq', 'fun': make_ineq('ins_peri', lo=22.0, hi=32.0)},
+        {'type': 'ineq', 'fun': make_ineq('ins_apo', lo=2140.0, hi=2305.0)},
+        {'type': 'ineq', 'fun': make_ineq('mid_peri', lo=150.0, hi=220.0)},
+        {'type': 'ineq', 'fun': make_ineq('mid_apo', lo=2100.0, hi=2350.0)},
+        {'type': 'ineq', 'fun': make_ineq('fin_peri', lo=150.0, hi=260.0)},
+        {'type': 'ineq', 'fun': make_ineq('fin_apo', lo=65000.0, hi=75000.0)},
+    ]
+
+    res_constrained = minimize(
+        constrained_objective,
+        list(result.x),
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        options={'maxiter': 500, 'ftol': 1e-6, 'disp': False}
+    )
+    if res_constrained.success:
+        result = res_constrained
+        print(f"  Constrained refine succeeded ({result.nfev} evals)", file=sys.stderr)
+    else:
+        print(f"  Constrained refine failed: {res_constrained.message}", file=sys.stderr)
+        cobyla_constraints = list(constraints)
+        for i, (lo, hi) in enumerate(bounds):
+            cobyla_constraints.append({'type': 'ineq', 'fun': lambda x, i=i, lo=lo: x[i] - lo})
+            cobyla_constraints.append({'type': 'ineq', 'fun': lambda x, i=i, hi=hi: hi - x[i]})
+        res_cobyla = minimize(
+            constrained_objective,
+            list(result.x),
+            method='COBYLA',
+            constraints=cobyla_constraints,
+            options={'maxiter': 2000, 'rhobeg': 0.05, 'tol': 1e-5, 'disp': False}
+        )
+        if res_cobyla.success:
+            result = res_cobyla
+            print(f"  COBYLA refine succeeded ({result.nfev} evals)", file=sys.stderr)
+        else:
+            print(f"  COBYLA refine failed: {res_cobyla.message}", file=sys.stderr)
+    final_x = np.array(result.x, dtype=np.float64)
+    final_nfev = getattr(result, 'nfev', 0)
+
+    traj0 = evaluate_trajectory(*final_x[:7])
+    ms_x0 = np.concatenate([
+        final_x,
+        traj0['burn1_after_state'],
+        traj0['mid_state'],
+        traj0['post_burn2_state'],
+    ])
+    node_window = np.array([3000, 3000, 3000, 2.0, 2.0, 2.0] * 3, dtype=np.float64)
+    lower_ms = np.concatenate([np.array([b[0] for b in bounds], dtype=np.float64), ms_x0[9:] - node_window])
+    upper_ms = np.concatenate([np.array([b[1] for b in bounds], dtype=np.float64), ms_x0[9:] + node_window])
+
+    def multiple_shooting_residuals(z):
+        p = z[:9]
+        y1 = np.array(z[9:15], dtype=np.float64)
+        y2 = np.array(z[15:21], dtype=np.float64)
+        y3 = np.array(z[21:27], dtype=np.float64)
+        ip = INS_PERI * p[7] + R_E * (1 - p[7])
+        ia = INS_APO * p[8] + R_E * (1 - p[8])
+        nonlocal a_ins, e_ins, omega_ins
+        a_ins = (ip + ia) / 2
+        e_ins = (ia - ip) / (ia + ip)
+        omega_ins = math.sqrt(MU / a_ins**3)
+        r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(p[4], p[5])
+        expected_y1 = np.array(list(r_b1) + add_vec(v_b1, add_vec(scale_vec(v_b1_dir, p[0]), scale_vec(r_b1_hat, p[2]))), dtype=np.float64)
+        burn2_start_h = p[6] - BURN2_DURATION_SEC / 7200.0
+        burn2_end_h = p[6] + BURN2_DURATION_SEC / 7200.0
+        prop_y2 = propagate_segment_state(y1, p[5], burn2_start_h)
+        prop_y3 = propagate_burn_state(y2, p[6], p[1], p[3])
+        endpoint = propagate_segment_state(y3, burn2_end_h, first_met_h)
+        mid_peri, mid_apo = orbital_altitudes(y2)
+        fin_peri, fin_apo = orbital_altitudes(y3)
+        st_ins = list(r_b1) + list(v_b1)
+        ins_seg = (p[5] - ASCENT_H) * 3600
+        elapsed_back = 0.0
+        min_alt_phase1 = mag(r_b1) - R_E
+        while elapsed_back < ins_seg:
+            this_dt = min(dt, ins_seg - elapsed_back)
+            moon_pos = moon_pos_at_met(p[5] - (elapsed_back + 0.5 * this_dt) / 3600)
+            st_ins = rk4_step(st_ins, -this_dt, moon_pos=moon_pos)
+            min_alt_phase1 = min(min_alt_phase1, mag(st_ins[:3]) - R_E)
+            elapsed_back += this_dt
+        meco_alt = mag(st_ins[:3]) - R_E
+        a_ins = (INS_PERI + INS_APO) / 2
+        e_ins = (INS_APO - INS_PERI) / (INS_APO + INS_PERI)
+        omega_ins = math.sqrt(MU / a_ins**3)
+        res = []
+        # Burn 1 is modeled as an impulse: position should connect, velocity may jump.
+        res.extend(((y1[:3] - expected_y1[:3]) / 6.0).tolist())
+        res.extend(((prop_y2[:3] - y2[:3]) / 5.0).tolist())
+        res.extend(((prop_y2[3:] - y2[3:]) / 0.005).tolist())
+        res.extend(((prop_y3[:3] - y3[:3]) / 5.0).tolist())
+        res.extend(((prop_y3[3:] - y3[3:]) / 0.005).tolist())
+        res.extend(((endpoint[:3] - np.array(r_target)) / 12.0).tolist())
+        res.extend(((endpoint[3:] - np.array(v_target)) / 0.006).tolist())
+        res.extend(((y1 - ms_x0[9:15]) / np.array([80, 80, 80, 0.08, 0.08, 0.08])).tolist())
+        res.extend(((y2 - ms_x0[15:21]) / np.array([80, 80, 80, 0.08, 0.08, 0.08])).tolist())
+        res.extend(((y3 - ms_x0[21:27]) / np.array([80, 80, 80, 0.08, 0.08, 0.08])).tolist())
+        res.extend([
+            (ip - R_E - 27.0) / 4.0,
+            (ia - R_E - 2222.0) / 12.0,
+            (mid_peri - 185.0) / 15.0,
+            (mid_apo - 2222.0) / 14.0,
+            (fin_peri - 185.0) / 25.0,
+            (fin_apo - 70000.0) / 1800.0,
+            (p[5] - 49.0 / 60.0) / 0.05,
+            (p[6] - 108.0 / 60.0) / 0.05,
+            (p[0] - dv1_nom) / 0.02,
+            p[2] / 0.006,
+            p[3] / 0.006,
+            max(0.0, -min_alt_phase1) / 5.0,
+            max(0.0, -meco_alt) / 5.0,
+        ])
+        return np.array(res, dtype=np.float64)
+
+    res_ms = least_squares(
+        multiple_shooting_residuals,
+        ms_x0,
+        bounds=(lower_ms, upper_ms),
+        method='trf',
+        loss='soft_l1',
+        f_scale=1.0,
+        max_nfev=1200,
+        verbose=0,
+    )
+    def evaluate_ms_solution(z):
+        p = np.array(z[:9], dtype=np.float64)
+        y1 = np.array(z[9:15], dtype=np.float64)
+        y2 = np.array(z[15:21], dtype=np.float64)
+        y3 = np.array(z[21:27], dtype=np.float64)
+        ip = INS_PERI * p[7] + R_E * (1 - p[7])
+        ia = INS_APO * p[8] + R_E * (1 - p[8])
+        nonlocal a_ins, e_ins, omega_ins
+        a_ins = (ip + ia) / 2
+        e_ins = (ia - ip) / (ia + ip)
+        omega_ins = math.sqrt(MU / a_ins**3)
+        r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(p[4], p[5])
+        burn1_expected = np.array(list(r_b1) + add_vec(v_b1, add_vec(scale_vec(v_b1_dir, p[0]), scale_vec(r_b1_hat, p[2]))), dtype=np.float64)
+        burn2_start_h = p[6] - BURN2_DURATION_SEC / 7200.0
+        burn2_end_h = p[6] + BURN2_DURATION_SEC / 7200.0
+        prop_y2 = propagate_segment_state(y1, p[5], burn2_start_h)
+        prop_y3 = propagate_burn_state(y2, p[6], p[1], p[3])
+        endpoint = propagate_segment_state(y3, burn2_end_h, first_met_h)
+        mid_peri, mid_apo = orbital_altitudes(y2)
+        fin_peri, fin_apo = orbital_altitudes(y3)
+        st_ins = list(r_b1) + list(v_b1)
+        ins_seg = (p[5] - ASCENT_H) * 3600
+        elapsed_back = 0.0
+        min_alt_phase1 = mag(r_b1) - R_E
+        while elapsed_back < ins_seg:
+            this_dt = min(dt, ins_seg - elapsed_back)
+            moon_pos = moon_pos_at_met(p[5] - (elapsed_back + 0.5 * this_dt) / 3600)
+            st_ins = rk4_step(st_ins, -this_dt, moon_pos=moon_pos)
+            min_alt_phase1 = min(min_alt_phase1, mag(st_ins[:3]) - R_E)
+            elapsed_back += this_dt
+        meco_state = np.array(st_ins, dtype=np.float64)
+        pe = mag((endpoint[:3] - np.array(r_target)).tolist())
+        va = math.degrees(math.acos(max(-1, min(1, dot(norm(endpoint[3:].tolist()), norm(v_target))))))
+        continuity_pos = max(
+            mag((y1[:3] - burn1_expected[:3]).tolist()),
+            mag((prop_y2[:3] - y2[:3]).tolist()),
+            mag((prop_y3[:3] - y3[:3]).tolist()),
+        )
+        continuity_vel = max(
+            mag((prop_y2[3:] - y2[3:]).tolist()),
+            mag((prop_y3[3:] - y3[3:]).tolist()),
+        )
+        a_ins = (INS_PERI + INS_APO) / 2
+        e_ins = (INS_APO - INS_PERI) / (INS_APO + INS_PERI)
+        omega_ins = math.sqrt(MU / a_ins**3)
+        return {
+            'params': p,
+            'y1': y1,
+            'y2': y2,
+            'y3': y3,
+            'meco_state': meco_state,
+            'pe': pe,
+            'va': va,
+            'ins_peri': ip - R_E,
+            'ins_apo': ia - R_E,
+            'mid_peri': mid_peri,
+            'mid_apo': mid_apo,
+            'fin_peri': fin_peri,
+            'fin_apo': fin_apo,
+            'min_alt_phase1': min_alt_phase1,
+            'continuity_pos': continuity_pos,
+            'continuity_vel': continuity_vel,
+        }
+    ms_solution = None
+    if res_ms.success:
+        ms_eval = evaluate_ms_solution(res_ms.x)
+        print(f"  Multiple shooting refine succeeded ({res_ms.nfev} evals): "
+              f"pos={ms_eval['pe']:.0f}km vel={ms_eval['va']:.1f}deg "
+              f"cont={ms_eval['continuity_pos']:.0f}km/{ms_eval['continuity_vel']*1000:.0f}m/s "
+              f"min_alt={ms_eval['min_alt_phase1']:.0f}km", file=sys.stderr)
+        if ms_eval['pe'] < 200 and ms_eval['continuity_pos'] < 50 and ms_eval['continuity_vel'] < 0.05:
+            ms_solution = ms_eval
+            final_x = np.array(ms_eval['params'], dtype=np.float64)
+            final_nfev = res_ms.nfev
+            print("  Multiple shooting solution accepted", file=sys.stderr)
+        else:
+            print("  Multiple shooting solution rejected (too much endpoint/continuity error)", file=sys.stderr)
+    else:
+        print(f"  Multiple shooting refine failed: {res_ms.message}", file=sys.stderr)
+
+    dv1o, dv2o, dv1ro, dv2ro, az_opt, b1h_opt, b2h_opt, peri_scale, apo_scale = final_x
     # Apply final orbit adjustment
     INS_PERI_FINAL = INS_PERI * peri_scale + R_E * (1 - peri_scale)
     INS_APO_FINAL = INS_APO * apo_scale + R_E * (1 - apo_scale)
     a_ins = (INS_PERI_FINAL + INS_APO_FINAL) / 2
     e_ins = (INS_APO_FINAL - INS_PERI_FINAL) / (INS_APO_FINAL + INS_PERI_FINAL)
     omega_ins = math.sqrt(MU / a_ins**3)
-    fp, fv = propagate(dv1o, dv2o, dv1ro, dv2ro, az_opt, b1h_opt, b2h_opt)
-    pe = mag([fp[i]-r_target[i] for i in range(3)])
-    va = math.degrees(math.acos(max(-1, min(1, dot(norm(fv), norm(v_target))))))
-    print(f"  Optimized ({result.nfev} evals): dv1={dv1o*1000:.0f}+{dv1ro*1000:.0f}r, "
+    if ms_solution is None:
+        fp, fv = propagate(dv1o, dv2o, dv1ro, dv2ro, az_opt, b1h_opt, b2h_opt)
+        pe = mag([fp[i]-r_target[i] for i in range(3)])
+        va = math.degrees(math.acos(max(-1, min(1, dot(norm(fv), norm(v_target))))))
+    else:
+        fp = propagate_segment_state(
+            ms_solution['y3'],
+            b2h_opt + BURN2_DURATION_SEC / 7200.0,
+            first_met_h
+        )[:3].tolist()
+        fv = propagate_segment_state(
+            ms_solution['y3'],
+            b2h_opt + BURN2_DURATION_SEC / 7200.0,
+            first_met_h
+        )[3:].tolist()
+        pe = ms_solution['pe']
+        va = ms_solution['va']
+    print(f"  Optimized ({final_nfev} evals): dv1={dv1o*1000:.0f}+{dv1ro*1000:.0f}r, "
           f"dv2={dv2o*1000:.0f}+{dv2ro*1000:.0f}r, az={math.degrees(az_opt):.1f}deg, "
           f"b1={b1h_opt:.3f}h, b2={b2h_opt:.3f}h, "
           f"peri={INS_PERI_FINAL-R_E:.0f}km({peri_scale:.3f}), apo={INS_APO_FINAL-R_E:.0f}km({apo_scale:.3f}), "
@@ -710,16 +1015,20 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     ins_states.reverse()  # chronological
 
     # MECO state = Phase 1 start (physically correct, RK4+J2 backward from burn1)
-    meco_state = ins_states[0][1]
+    meco_state = ins_states[0][1] if ms_solution is None else ms_solution['meco_state'].tolist()
     meco_pos = meco_state[:3]
     meco_spd = mag(meco_state[3:])
 
     # --- Phase 0: Ascent (KSC ground → MECO) ---
     n_ascent = max(2, int(ASCENT_H * 3600 / 10))
+    ksc_dir = norm(ksc_pos)
+    meco_dir = norm(meco_pos)
     for i in range(n_ascent + 1):
         t = i / n_ascent
         met_h = t * ASCENT_H
-        pos = [ksc_pos[j] * (1 - t) + meco_pos[j] * t for j in range(3)]
+        dir_blend = norm([ksc_dir[j] * (1 - t) + meco_dir[j] * t for j in range(3)])
+        radius = mag(ksc_pos) * (1 - t) + mag(meco_pos) * t
+        pos = [dir_blend[j] * radius for j in range(3)]
         spd = 0.4 + t * (meco_spd - 0.4)
         add_pt(met_h, pos, spd)
 
@@ -730,8 +1039,11 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         add_pt(met_h, st[:3], mag(st[3:]))
 
     # --- Phase 2+3: Two burns + propagation (mirroring propagate() exactly) ---
-    v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1o), scale_vec(r_b1_hat, dv1ro)))
-    st = list(r_b1) + v_after
+    if ms_solution is None:
+        v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1o), scale_vec(r_b1_hat, dv1ro)))
+        st = list(r_b1) + v_after
+    else:
+        st = ms_solution['y1'].tolist()
 
     burn2_start_h = BURN2_H - BURN2_DURATION_SEC / 7200.0
     burn2_end_h = BURN2_H + BURN2_DURATION_SEC / 7200.0
@@ -747,6 +1059,8 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         moon_pos = moon_pos_at_met(mh + 0.5 * this_dt / 3600)
         st = rk4_step(st, this_dt, moon_pos=moon_pos)
         elapsed += this_dt; step += 1
+    if ms_solution is not None:
+        st = ms_solution['y2'].tolist()
 
     # Finite burn2
     burn_elapsed = 0.0
@@ -763,6 +1077,8 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         st[4] += vd[1] * dv2o * dv_scale + rd[1] * dv2ro * dv_scale
         st[5] += vd[2] * dv2o * dv_scale + rd[2] * dv2ro * dv_scale
         burn_elapsed += this_dt; step += 1
+    if ms_solution is not None:
+        st = ms_solution['y3'].tolist()
 
     # Segment 2: burn2 end → Horizons
     seg2 = (first_met_h - burn2_end_h) * 3600
