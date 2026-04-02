@@ -7,6 +7,7 @@ Usage:
 import json, re, math, sys
 from datetime import datetime, timezone
 from scipy.optimize import minimize
+from numba import njit
 
 def parse_horizons(filepath):
     """Parse Horizons vector output into list of {jd, x, y, z, vx, vy, vz}."""
@@ -226,46 +227,65 @@ def lambert(r1_vec, r2_vec, tof_sec, mu=398600.4418):
     return v1, v2
 
 
-J2 = 1.08263e-3   # Earth J2
-R_E_J2 = 6378.137  # Earth equatorial radius for J2 (km)
+import numpy as np
 
-def rk4_step(state, dt, mu=398600.4418, moon_pos=None, mu_moon=4902.8):
-    """RK4 integration step. state = [x,y,z,vx,vy,vz].
-    Includes Earth J2 and optional lunar gravity."""
+_J2 = 1.08263e-3
+_R_E_J2 = 6378.137
+_MU = 398600.4418
+_MU_MOON = 4902.8
+_NO_MOON = np.zeros(3)
+
+@njit(cache=True)
+def _rk4_step(s, dt, moon_pos):
+    """Numba-optimized RK4 step with Earth J2 + Moon gravity."""
     def deriv(s):
-        r = math.sqrt(s[0]**2 + s[1]**2 + s[2]**2)
-        r2 = r * r
+        r2 = s[0]*s[0] + s[1]*s[1] + s[2]*s[2]
+        r = math.sqrt(r2)
         r3 = r2 * r
-        ax, ay, az = -mu*s[0]/r3, -mu*s[1]/r3, -mu*s[2]/r3
+        ax = -_MU*s[0]/r3
+        ay = -_MU*s[1]/r3
+        az = -_MU*s[2]/r3
+        # J2
+        z2_r2 = s[2]*s[2] / r2
+        fJ2 = 1.5 * _J2 * _MU * _R_E_J2*_R_E_J2 / (r2 * r3)
+        ax += fJ2 * s[0] * (5*z2_r2 - 1)
+        ay += fJ2 * s[1] * (5*z2_r2 - 1)
+        az += fJ2 * s[2] * (5*z2_r2 - 3)
+        # Moon
+        if moon_pos[0] != 0.0 or moon_pos[1] != 0.0 or moon_pos[2] != 0.0:
+            dx = s[0]-moon_pos[0]; dy = s[1]-moon_pos[1]; dz = s[2]-moon_pos[2]
+            rm = math.sqrt(dx*dx+dy*dy+dz*dz); rm3 = rm*rm*rm
+            rm0 = math.sqrt(moon_pos[0]**2+moon_pos[1]**2+moon_pos[2]**2); rm03 = rm0**3
+            ax += -_MU_MOON*dx/rm3 - _MU_MOON*moon_pos[0]/rm03
+            ay += -_MU_MOON*dy/rm3 - _MU_MOON*moon_pos[1]/rm03
+            az += -_MU_MOON*dz/rm3 - _MU_MOON*moon_pos[2]/rm03
+        out = np.empty(6)
+        out[0]=s[3]; out[1]=s[4]; out[2]=s[5]; out[3]=ax; out[4]=ay; out[5]=az
+        return out
 
-        # J2 perturbation (ICRF Z ≈ Earth's north pole)
-        z2_r2 = s[2]**2 / r2
-        fJ2 = 1.5 * J2 * mu * R_E_J2**2 / (r2 * r3)
-        ax += fJ2 * s[0] * (5 * z2_r2 - 1)
-        ay += fJ2 * s[1] * (5 * z2_r2 - 1)
-        az += fJ2 * s[2] * (5 * z2_r2 - 3)
+    k1 = deriv(s)
+    k2 = deriv(s + dt*0.5*k1)
+    k3 = deriv(s + dt*0.5*k2)
+    k4 = deriv(s + dt*k3)
+    return s + dt/6.0 * (k1 + 2*k2 + 2*k3 + k4)
 
-        if moon_pos:
-            dx = s[0] - moon_pos[0]
-            dy = s[1] - moon_pos[1]
-            dz = s[2] - moon_pos[2]
-            rm = math.sqrt(dx**2 + dy**2 + dz**2)
-            rm3 = rm**3
-            rm0 = math.sqrt(moon_pos[0]**2 + moon_pos[1]**2 + moon_pos[2]**2)
-            rm03 = rm0**3
-            ax += -mu_moon * dx / rm3 - mu_moon * moon_pos[0] / rm03
-            ay += -mu_moon * dy / rm3 - mu_moon * moon_pos[1] / rm03
-            az += -mu_moon * dz / rm3 - mu_moon * moon_pos[2] / rm03
-        return [s[3], s[4], s[5], ax, ay, az]
+@njit(cache=True)
+def _propagate_segment(state, dt, total_sec, moon_pos):
+    """Propagate a segment using RK4. Returns final state."""
+    s = state.copy()
+    elapsed = 0.0
+    while elapsed < total_sec:
+        this_dt = min(dt, total_sec - elapsed)
+        s = _rk4_step(s, this_dt, moon_pos)
+        elapsed += this_dt
+    return s
 
-    k1 = deriv(state)
-    s2 = [state[i] + dt/2 * k1[i] for i in range(6)]
-    k2 = deriv(s2)
-    s3 = [state[i] + dt/2 * k2[i] for i in range(6)]
-    k3 = deriv(s3)
-    s4 = [state[i] + dt * k3[i] for i in range(6)]
-    k4 = deriv(s4)
-    return [state[i] + dt/6 * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]) for i in range(6)]
+# Wrapper to accept lists (for compatibility)
+def rk4_step(state, dt, mu=398600.4418, moon_pos=None, mu_moon=4902.8):
+    s = np.array(state, dtype=np.float64)
+    mp = np.array(moon_pos, dtype=np.float64) if moon_pos else _NO_MOON
+    result = _rk4_step(s, dt, mp)
+    return result.tolist()
 
 
 def get_era(jd):
@@ -319,6 +339,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     print(f"  KSC ICRF: ({ksc_pos[0]:.0f}, {ksc_pos[1]:.0f}, {ksc_pos[2]:.0f}) km", file=sys.stderr)
 
     h_vec = norm(cross(r_target, v_target))
+
     ksc_in_plane = [ksc_pos[i] - dot(ksc_pos, h_vec) * h_vec[i] for i in range(3)]
     e1_base = norm(ksc_in_plane)
     e2_base = norm(cross(h_vec, e1_base))
@@ -339,7 +360,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     ASCENT_H = 0.13
     BURN1_H = 0.82   # perigee raise (ICPS) ~T+49min
     BURN2_H = 1.8    # apogee raise (ICPS) ~T+1:48, 18min burn
-    dt = 10.0  # 10-second steps (1s tested: no improvement, 10x slower)
+    dt = 10.0  # 10-second steps (numba JIT for speed)
 
     def kepler_solve_burn(M, ecc, a, tol=1e-10):
         E = M
@@ -368,37 +389,34 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         e2r = [-s*e1_base[i] + c*e2_base[i] for i in range(3)]
         return e1r, e2r
 
-    def get_burn1_state(azimuth, b1h=BURN1_H, m_off=0):
-        """Compute burn1 position/velocity on fixed 27x2222km insertion orbit."""
+    def get_burn1_state(azimuth, b1h=BURN1_H):
+        """Compute burn1 state on insertion orbit (Kepler equation, fast)."""
         e1r, e2r = rotate_basis(azimuth)
-        a = a_ins
-        e = e_ins
-        omega = math.sqrt(MU / a**3)
-        M = omega * b1h * 3600 + m_off
-        nu, r_mag = kepler_solve_burn(M, e, a)
+        omega = math.sqrt(MU / a_ins**3)
+        M = omega * b1h * 3600
+        nu, r_mag = kepler_solve_burn(M, e_ins, a_ins)
         r = add_vec(scale_vec(e1r, r_mag * math.cos(nu)),
                     scale_vec(e2r, r_mag * math.sin(nu)))
         v_dir = norm([-math.sin(nu) * e1r[i] + math.cos(nu) * e2r[i] for i in range(3)])
-        v_mag = v_at(r_mag, a)
+        v_mag = v_at(r_mag, a_ins)
         return r, scale_vec(v_dir, v_mag), v_dir, norm(r)
 
-    def propagate(dv1, dv2, dv1r, dv2r, azimuth, b1h=BURN1_H, b2h=BURN2_H, m_off=0):
-        r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(azimuth, b1h, m_off)
+    moon_np = np.array(moon_km, dtype=np.float64)
+
+    def propagate(dv1, dv2, dv1r, dv2r, azimuth, b1h=BURN1_H, b2h=BURN2_H):
+        r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(azimuth, b1h)
         v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1), scale_vec(r_b1_hat, dv1r)))
-        st = list(r_b1) + v_after
-        elapsed = 0.0; seg1 = (b2h - b1h) * 3600
-        while elapsed < seg1:
-            st = rk4_step(st, min(dt, seg1 - elapsed), moon_pos=moon_km)
-            elapsed += min(dt, seg1 - elapsed)
-        vd = norm(st[3:]); rd = norm(st[:3])
+        st = np.array(list(r_b1) + v_after, dtype=np.float64)
+        # Segment 1: burn1 → burn2
+        st = _propagate_segment(st, dt, (b2h - b1h) * 3600, moon_np)
+        # Apply burn2
+        vd = norm(st[3:].tolist()); rd = norm(st[:3].tolist())
         st[3] += vd[0]*dv2 + rd[0]*dv2r
         st[4] += vd[1]*dv2 + rd[1]*dv2r
         st[5] += vd[2]*dv2 + rd[2]*dv2r
-        elapsed = 0.0; seg2 = (first_met_h - b2h) * 3600
-        while elapsed < seg2:
-            st = rk4_step(st, min(dt, seg2 - elapsed), moon_pos=moon_km)
-            elapsed += min(dt, seg2 - elapsed)
-        return st[:3], st[3:]
+        # Segment 2: burn2 → Horizons
+        st = _propagate_segment(st, dt, (first_met_h - b2h) * 3600, moon_np)
+        return st[:3].tolist(), st[3:].tolist()
 
     # 9 params: Δv (4) + azimuth + burn times (2) + insertion orbit adjustment (2)
     # Insertion orbit starts at 27×2222km, allowed ±10% adjustment
@@ -412,7 +430,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         (0.6, 1.1),             # burn1 effective time
         (1.5, 2.2),             # burn2 effective time
         (0.85, 1.15),           # ins_peri scale (±15%)
-        (0.85, 1.15),           # ins_apo scale
+        (0.85, 1.15),           # ins_apo scale (±15%)
     ]
 
     def cost_bounded(x):
@@ -515,46 +533,42 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         r = a_ins * (1 - ecc * math.cos(E))
         return nu, r
 
-    # Phase 0+1 combined: ascent then insertion orbit
-    # Compute Phase 1's state at ASCENT_H for smooth connection
-    M_ascent = omega_ins * ASCENT_H * 3600
-    nu_ascent, _ = kepler_solve(M_ascent, e_ins)
+    # --- Phase 1: Backward RK4 from burn1 to MECO (with J2, consistent with Phase 2+3) ---
+    r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(az_opt, b1h_opt)
+    # burn1_pre = state on insertion orbit at burn1 time
+    st_ins = list(r_b1) + list(v_b1)
+    ins_seg = (BURN1_H - ASCENT_H) * 3600
+    ins_states = []
+    el = 0.0
+    while el < ins_seg:
+        ins_states.append((BURN1_H - el / 3600, list(st_ins)))
+        this_dt = min(dt, ins_seg - el)
+        st_ins = rk4_step(st_ins, -this_dt, moon_pos=moon_km)
+        el += this_dt
+    ins_states.append((ASCENT_H, list(st_ins)))
+    ins_states.reverse()  # chronological
 
-    # Phase 0: Ascent (T+0 to T+0.13h)
-    # At MECO (T+8min), spacecraft is already on the 27x2222km insertion orbit.
-    # Ascent smoothly transitions from ground to Kepler orbit position.
-    M_meco = omega_ins * ASCENT_H * 3600 + 0
-    nu_meco, r_meco = kepler_solve(M_meco, e_ins)
-    r_meco = max(r_meco, R_E + 10)
+    # MECO state = Phase 1 start (physically correct, RK4+J2 backward from burn1)
+    meco_state = ins_states[0][1]
+    meco_pos = meco_state[:3]
+    meco_spd = mag(meco_state[3:])
 
+    # --- Phase 0: Ascent (KSC ground → MECO) ---
     n_ascent = max(2, int(ASCENT_H * 3600 / 10))
     for i in range(n_ascent + 1):
         t = i / n_ascent
         met_h = t * ASCENT_H
-        # Radius: ground → Kepler radius at MECO
-        r = R_E + t * (r_meco - R_E)
-        # Angle: 0 → nu_meco
-        ang = t * nu_meco
-        pos = add_vec(scale_vec(e1, r*math.cos(ang)), scale_vec(e2, r*math.sin(ang)))
-        spd = 0.4 + t * (v_at(r_meco, a_ins) - 0.4)
+        pos = [ksc_pos[j] * (1 - t) + meco_pos[j] * t for j in range(3)]
+        spd = 0.4 + t * (meco_spd - 0.4)
         add_pt(met_h, pos, spd)
 
-    # Phase 1: Insertion orbit (T+0.13h to burn1), every 10 seconds
-    # Already on Kepler orbit, no blending needed
-    for i in range(1, int((BURN1_H - ASCENT_H) * 3600 / 10) + 1):
-        ts = ASCENT_H * 3600 + i * 10
-        met_h = ts / 3600
-        if met_h > BURN1_H: break
-        M = omega_ins * ts + 0
-        nu, r = kepler_solve(M, e_ins)
-        r = max(r, R_E + 10)
-        # Position in orbital plane using true anomaly
-        # nu is measured from perigee; in our basis, perigee is at e1 direction
-        pos = add_vec(scale_vec(e1, r*math.cos(nu)), scale_vec(e2, r*math.sin(nu)))
-        add_pt(met_h, pos, v_at(r, a_ins))
+    # --- Phase 1 points ---
+    for met_h, st in ins_states:
+        if met_h <= ASCENT_H:
+            continue
+        add_pt(met_h, st[:3], mag(st[3:]))
 
-    # Phase 2+3: Two burns + propagation (mirroring propagate() exactly)
-    r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(az_opt, b1h_opt)
+    # --- Phase 2+3: Two burns + propagation (mirroring propagate() exactly) ---
     v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1o), scale_vec(r_b1_hat, dv1ro)))
     st = list(r_b1) + v_after
 
