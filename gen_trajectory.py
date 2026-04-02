@@ -230,6 +230,7 @@ def lambert(r1_vec, r2_vec, tof_sec, mu=398600.4418):
 import numpy as np
 
 _J2 = 1.08263e-3
+_J3 = -2.5327e-6
 _R_E_J2 = 6378.137
 _MU = 398600.4418
 _MU_MOON = 4902.8
@@ -245,12 +246,23 @@ def _rk4_step(s, dt, moon_pos):
         ax = -_MU*s[0]/r3
         ay = -_MU*s[1]/r3
         az = -_MU*s[2]/r3
-        # J2
-        z2_r2 = s[2]*s[2] / r2
-        fJ2 = 1.5 * _J2 * _MU * _R_E_J2*_R_E_J2 / (r2 * r3)
+        # J2 + J3
+        z = s[2]; z2 = z*z; z2_r2 = z2 / r2
+        Re2 = _R_E_J2 * _R_E_J2
+        fJ2 = 1.5 * _J2 * _MU * Re2 / (r2 * r3)
         ax += fJ2 * s[0] * (5*z2_r2 - 1)
         ay += fJ2 * s[1] * (5*z2_r2 - 1)
         az += fJ2 * s[2] * (5*z2_r2 - 3)
+        # J3 (zonal harmonic, derived from the degree-3 Legendre term)
+        Re3 = Re2 * _R_E_J2
+        r5 = r2 * r3
+        r7 = r5 * r2
+        r9 = r7 * r2
+        fJ3 = 0.5 * _J3 * _MU * Re3
+        common_xy = 5.0 * fJ3 * z * (3.0 * r2 - 7.0 * z2) / r9
+        ax += common_xy * s[0]
+        ay += common_xy * s[1]
+        az += fJ3 * (-3.0 * r2 * r2 + 30.0 * z2 * r2 - 35.0 * z2 * z2) / r9
         # Moon
         if moon_pos[0] != 0.0 or moon_pos[1] != 0.0 or moon_pos[2] != 0.0:
             dx = s[0]-moon_pos[0]; dy = s[1]-moon_pos[1]; dz = s[2]-moon_pos[2]
@@ -277,6 +289,49 @@ def _propagate_segment(state, dt, total_sec, moon_pos):
     while elapsed < total_sec:
         this_dt = min(dt, total_sec - elapsed)
         s = _rk4_step(s, this_dt, moon_pos)
+        elapsed += this_dt
+    return s
+
+
+@njit(cache=True)
+def _propagate_segment_linear_moon(state, dt, total_sec, moon_pos_ref, moon_vel_ref, seg_start_sec, moon_ref_sec):
+    """Propagate a segment using RK4 with linearly moving moon ephemeris."""
+    s = state.copy()
+    elapsed = 0.0
+    while elapsed < total_sec:
+        this_dt = min(dt, total_sec - elapsed)
+        mid_t = seg_start_sec + elapsed + 0.5 * this_dt
+        moon_pos = moon_pos_ref + moon_vel_ref * (mid_t - moon_ref_sec)
+        s = _rk4_step(s, this_dt, moon_pos)
+        elapsed += this_dt
+    return s
+
+
+@njit(cache=True)
+def _propagate_burn_linear_moon(state, dt, burn_sec, dv_total, dv_radial_total,
+                                moon_pos_ref, moon_vel_ref, burn_start_sec, moon_ref_sec):
+    """Propagate while applying a finite burn with linearly moving moon ephemeris."""
+    s = state.copy()
+    elapsed = 0.0
+    while elapsed < burn_sec:
+        this_dt = min(dt, burn_sec - elapsed)
+        mid_t = burn_start_sec + elapsed + 0.5 * this_dt
+        moon_pos = moon_pos_ref + moon_vel_ref * (mid_t - moon_ref_sec)
+        s = _rk4_step(s, this_dt, moon_pos)
+        dv_step = dv_total * this_dt / burn_sec
+        dv_radial_step = dv_radial_total * this_dt / burn_sec
+        vx = s[3]; vy = s[4]; vz = s[5]
+        rx = s[0]; ry = s[1]; rz = s[2]
+        vmag = math.sqrt(vx*vx + vy*vy + vz*vz)
+        rmag = math.sqrt(rx*rx + ry*ry + rz*rz)
+        if vmag > 0.0:
+            s[3] += vx / vmag * dv_step
+            s[4] += vy / vmag * dv_step
+            s[5] += vz / vmag * dv_step
+        if rmag > 0.0:
+            s[3] += rx / rmag * dv_radial_step
+            s[4] += ry / rmag * dv_radial_step
+            s[5] += rz / rmag * dv_radial_step
         elapsed += this_dt
     return s
 
@@ -330,6 +385,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     moon_pos_scene = [first_moon['x'] * SCALE, first_moon['y'] * SCALE, first_moon['z'] * SCALE]
     moon_dist_km = mag([first_moon['x'], first_moon['y'], first_moon['z']])
     moon_km = [first_moon['x'], first_moon['y'], first_moon['z']]
+    moon_vel_km = [first_moon['vx'], first_moon['vy'], first_moon['vz']]
 
     MU = 398600.4418
     R_E = 6378
@@ -338,7 +394,20 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     ksc_pos = ksc_icrf(launch_jd)
     print(f"  KSC ICRF: ({ksc_pos[0]:.0f}, {ksc_pos[1]:.0f}, {ksc_pos[2]:.0f}) km", file=sys.stderr)
 
-    h_vec = norm(cross(r_target, v_target))
+    h_vec_t34 = norm(cross(r_target, v_target))
+
+    # Correct orbital plane from T+3.4h back to T+0
+    # Total J2 precession over 3 orbit phases: ΔRAAN=-0.39°, Δω=+0.64°
+    # Rotate h_vec around Z by -ΔRAAN to get T+0 plane
+    # Also rotate basis vectors by -Δω for perigee argument
+    _dRaan_total = math.radians(-0.39)  # RAAN shift T+0→T+3.4h
+    _domega_total = math.radians(0.64)  # ω shift T+0→T+3.4h
+    cos_r = math.cos(-_dRaan_total); sin_r = math.sin(-_dRaan_total)
+    h_vec = norm([
+        h_vec_t34[0]*cos_r - h_vec_t34[1]*sin_r,
+        h_vec_t34[0]*sin_r + h_vec_t34[1]*cos_r,
+        h_vec_t34[2]
+    ])
 
     ksc_in_plane = [ksc_pos[i] - dot(ksc_pos, h_vec) * h_vec[i] for i in range(3)]
     e1_base = norm(ksc_in_plane)
@@ -360,6 +429,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     ASCENT_H = 0.13
     BURN1_H = 0.82   # perigee raise (ICPS) ~T+49min
     BURN2_H = 1.8    # apogee raise (ICPS) ~T+1:48, 18min burn
+    BURN2_DURATION_SEC = 18.0 * 60.0
     dt = 10.0  # 10-second steps (numba JIT for speed)
 
     def kepler_solve_burn(M, ecc, a, tol=1e-10):
@@ -389,6 +459,17 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         e2r = [-s*e1_base[i] + c*e2_base[i] for i in range(3)]
         return e1r, e2r
 
+    # J2 secular precession of insertion orbit (T+0 → burn1)
+    # Computed from 3-orbit analysis: investment + intermediate + checkout
+    # RAAN shift: -0.177° for insertion orbit over 0.82h
+    # ω shift: +0.289° for insertion orbit over 0.82h
+    # These values correct for the fact that h_vec is from T+3.4h, not T+0
+    _inc_rad = math.acos(max(-1, min(1, h_vec[2])))
+    _n_ins = math.sqrt(MU / a_ins**3)
+    _p_factor = (R_E / a_ins)**2 / (1 - e_ins**2)**2
+    _dRaan_dt = -1.5 * _n_ins * _J2 * _p_factor * math.cos(_inc_rad)
+    _domega_dt = 1.5 * _n_ins * _J2 * _p_factor * (2 - 2.5 * math.sin(_inc_rad)**2)
+
     def get_burn1_state(azimuth, b1h=BURN1_H):
         """Compute burn1 state on insertion orbit (Kepler equation, fast)."""
         e1r, e2r = rotate_basis(azimuth)
@@ -402,21 +483,72 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         return r, scale_vec(v_dir, v_mag), v_dir, norm(r)
 
     moon_np = np.array(moon_km, dtype=np.float64)
+    moon_vel_np = np.array(moon_vel_km, dtype=np.float64)
+    moon_ref_sec = first_met_h * 3600.0
 
-    def propagate(dv1, dv2, dv1r, dv2r, azimuth, b1h=BURN1_H, b2h=BURN2_H):
+    def moon_pos_at_met(met_h):
+        dt_sec = met_h * 3600.0 - moon_ref_sec
+        return [moon_km[i] + moon_vel_km[i] * dt_sec for i in range(3)]
+
+    def orbital_altitudes(state):
+        r_vec = state[:3].tolist() if hasattr(state[:3], 'tolist') else list(state[:3])
+        v_vec = state[3:].tolist() if hasattr(state[3:], 'tolist') else list(state[3:])
+        rmag = mag(r_vec)
+        vmag = mag(v_vec)
+        energy = vmag * vmag / 2 - MU / rmag
+        if energy >= 0:
+            return float('inf'), float('inf')
+        hmag = mag(cross(r_vec, v_vec))
+        ecc_term = 1 + 2 * energy * hmag * hmag / (MU * MU)
+        ecc = math.sqrt(max(0.0, ecc_term))
+        a = -MU / (2 * energy)
+        rp = a * (1 - ecc) - R_E
+        ra = a * (1 + ecc) - R_E
+        return rp, ra
+
+    def evaluate_trajectory(dv1, dv2, dv1r, dv2r, azimuth, b1h=BURN1_H, b2h=BURN2_H):
         r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(azimuth, b1h)
+        st_ins = list(r_b1) + list(v_b1)
+        ins_seg = (b1h - ASCENT_H) * 3600
+        elapsed_back = 0.0
+        min_alt_phase1 = mag(r_b1) - R_E
+        while elapsed_back < ins_seg:
+            this_dt = min(dt, ins_seg - elapsed_back)
+            moon_pos = moon_pos_at_met(b1h - (elapsed_back + 0.5 * this_dt) / 3600)
+            st_ins = rk4_step(st_ins, -this_dt, moon_pos=moon_pos)
+            min_alt_phase1 = min(min_alt_phase1, mag(st_ins[:3]) - R_E)
+            elapsed_back += this_dt
+        meco_state = np.array(st_ins, dtype=np.float64)
         v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1), scale_vec(r_b1_hat, dv1r)))
         st = np.array(list(r_b1) + v_after, dtype=np.float64)
-        # Segment 1: burn1 → burn2
-        st = _propagate_segment(st, dt, (b2h - b1h) * 3600, moon_np)
-        # Apply burn2
-        vd = norm(st[3:].tolist()); rd = norm(st[:3].tolist())
-        st[3] += vd[0]*dv2 + rd[0]*dv2r
-        st[4] += vd[1]*dv2 + rd[1]*dv2r
-        st[5] += vd[2]*dv2 + rd[2]*dv2r
-        # Segment 2: burn2 → Horizons
-        st = _propagate_segment(st, dt, (first_met_h - b2h) * 3600, moon_np)
-        return st[:3].tolist(), st[3:].tolist()
+        burn2_start_h = b2h - BURN2_DURATION_SEC / 7200.0
+        burn2_end_h = b2h + BURN2_DURATION_SEC / 7200.0
+        # Segment 1: burn1 → burn2 start
+        st = _propagate_segment_linear_moon(
+            st, dt, (burn2_start_h - b1h) * 3600, moon_np, moon_vel_np, b1h * 3600.0, moon_ref_sec
+        )
+        mid_state = st.copy()
+        # Finite burn2 centered at b2h
+        st = _propagate_burn_linear_moon(
+            st, dt, BURN2_DURATION_SEC, dv2, dv2r, moon_np, moon_vel_np, burn2_start_h * 3600.0, moon_ref_sec
+        )
+        post_burn2_state = st.copy()
+        # Segment 2: burn2 end → Horizons
+        st = _propagate_segment_linear_moon(
+            st, dt, (first_met_h - burn2_end_h) * 3600, moon_np, moon_vel_np, burn2_end_h * 3600.0, moon_ref_sec
+        )
+        return {
+            'pos': st[:3].tolist(),
+            'vel': st[3:].tolist(),
+            'mid_state': mid_state,
+            'post_burn2_state': post_burn2_state,
+            'meco_state': meco_state,
+            'min_alt_phase1': min_alt_phase1,
+        }
+
+    def propagate(dv1, dv2, dv1r, dv2r, azimuth, b1h=BURN1_H, b2h=BURN2_H):
+        result = evaluate_trajectory(dv1, dv2, dv1r, dv2r, azimuth, b1h, b2h)
+        return result['pos'], result['vel']
 
     # 9 params: Δv (4) + azimuth + burn times (2) + insertion orbit adjustment (2)
     # Insertion orbit starts at 27×2222km, allowed ±10% adjustment
@@ -424,8 +556,8 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     bounds = [
         (-0.5, 1.0),            # dv1
         (1.5, 3.5),             # dv2
-        (-0.3, 0.3),            # dv1r
-        (-0.3, 0.3),            # dv2r
+        (-0.08, 0.08),          # dv1r
+        (-0.08, 0.08),          # dv2r
         (-0.2, 0.2),            # azimuth
         (0.6, 1.1),             # burn1 effective time
         (1.5, 2.2),             # burn2 effective time
@@ -445,10 +577,24 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
             a_ins = (ip + ia) / 2
             e_ins = (ia - ip) / (ia + ip)
             omega_ins = math.sqrt(MU / a_ins**3)
-            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+            traj = evaluate_trajectory(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+            pos, vel = traj['pos'], traj['vel']
             pe = mag([pos[i] - r_target[i] for i in range(3)])
             ve = mag([vel[i] - v_target[i] for i in range(3)]) * 1000
-            return pe + ve
+            mid_peri, mid_apo = orbital_altitudes(traj['mid_state'])
+            fin_peri, fin_apo = orbital_altitudes(traj['post_burn2_state'])
+            meco_alt = mag(traj['meco_state'][:3].tolist()) - R_E
+            ins_pen = ((ip - R_E - 27.0) / 27.0) ** 2 + ((ia - R_E - 2222.0) / 2222.0) ** 2
+            mid_pen = ((mid_peri - 185.0) / 185.0) ** 2 + ((mid_apo - 2222.0) / 2222.0) ** 2
+            fin_pen = ((fin_peri - 185.0) / 185.0) ** 2 + ((fin_apo - 70000.0) / 70000.0) ** 2
+            time_pen = ((x[5] - 49.0 / 60.0) / 0.15) ** 2 + ((x[6] - 108.0 / 60.0) / 0.15) ** 2
+            radial_pen = (x[2] / 0.02) ** 2 + (x[3] / 0.02) ** 2
+            altitude_pen = 0.0
+            if traj['min_alt_phase1'] < 0:
+                altitude_pen += ((traj['min_alt_phase1']) / 20.0) ** 2
+            if meco_alt < 0:
+                altitude_pen += (meco_alt / 20.0) ** 2
+            return pe + ve + 4000 * ins_pen + 4000 * mid_pen + 3000 * fin_pen + 300 * time_pen + 1000 * radial_pen + 8000 * altitude_pen
         except:
             return 1e12
         finally:
@@ -473,10 +619,24 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
             a_ins = (ip + ia) / 2
             e_ins = (ia - ip) / (ia + ip)
             omega_ins = math.sqrt(MU / a_ins**3)
-            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+            traj = evaluate_trajectory(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+            pos, vel = traj['pos'], traj['vel']
             pe = mag([pos[i] - r_target[i] for i in range(3)])
             ve = mag([vel[i] - v_target[i] for i in range(3)]) * 2000  # 2x higher velocity weight
-            return pe + ve
+            mid_peri, mid_apo = orbital_altitudes(traj['mid_state'])
+            fin_peri, fin_apo = orbital_altitudes(traj['post_burn2_state'])
+            meco_alt = mag(traj['meco_state'][:3].tolist()) - R_E
+            ins_pen = ((ip - R_E - 27.0) / 27.0) ** 2 + ((ia - R_E - 2222.0) / 2222.0) ** 2
+            mid_pen = ((mid_peri - 185.0) / 185.0) ** 2 + ((mid_apo - 2222.0) / 2222.0) ** 2
+            fin_pen = ((fin_peri - 185.0) / 185.0) ** 2 + ((fin_apo - 70000.0) / 70000.0) ** 2
+            time_pen = ((x[5] - 49.0 / 60.0) / 0.15) ** 2 + ((x[6] - 108.0 / 60.0) / 0.15) ** 2
+            radial_pen = (x[2] / 0.02) ** 2 + (x[3] / 0.02) ** 2
+            altitude_pen = 0.0
+            if traj['min_alt_phase1'] < 0:
+                altitude_pen += ((traj['min_alt_phase1']) / 20.0) ** 2
+            if meco_alt < 0:
+                altitude_pen += (meco_alt / 20.0) ** 2
+            return pe + ve + 4000 * ins_pen + 4000 * mid_pen + 3000 * fin_pen + 300 * time_pen + 1000 * radial_pen + 8000 * altitude_pen
         except:
             return 1e12
         finally:
@@ -543,7 +703,8 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     while el < ins_seg:
         ins_states.append((BURN1_H - el / 3600, list(st_ins)))
         this_dt = min(dt, ins_seg - el)
-        st_ins = rk4_step(st_ins, -this_dt, moon_pos=moon_km)
+        moon_pos = moon_pos_at_met(BURN1_H - (el + 0.5 * this_dt) / 3600)
+        st_ins = rk4_step(st_ins, -this_dt, moon_pos=moon_pos)
         el += this_dt
     ins_states.append((ASCENT_H, list(st_ins)))
     ins_states.reverse()  # chronological
@@ -572,32 +733,47 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1o), scale_vec(r_b1_hat, dv1ro)))
     st = list(r_b1) + v_after
 
-    # Segment 1: burn1 → burn2
-    seg1 = (BURN2_H - BURN1_H) * 3600
+    burn2_start_h = BURN2_H - BURN2_DURATION_SEC / 7200.0
+    burn2_end_h = BURN2_H + BURN2_DURATION_SEC / 7200.0
+
+    # Segment 1: burn1 → burn2 start
+    seg1 = (burn2_start_h - BURN1_H) * 3600
     elapsed = 0.0; step = 0
     while elapsed < seg1:
         mh = BURN1_H + elapsed / 3600
         if step % 6 == 0:
             add_pt(mh, st[:3], mag(st[3:]))
         this_dt = min(dt, seg1 - elapsed)
-        st = rk4_step(st, this_dt, moon_pos=moon_km)
+        moon_pos = moon_pos_at_met(mh + 0.5 * this_dt / 3600)
+        st = rk4_step(st, this_dt, moon_pos=moon_pos)
         elapsed += this_dt; step += 1
 
-    # Apply burn2
-    vd = norm(st[3:]); rd = norm(st[:3])
-    st[3] += vd[0]*dv2o + rd[0]*dv2ro
-    st[4] += vd[1]*dv2o + rd[1]*dv2ro
-    st[5] += vd[2]*dv2o + rd[2]*dv2ro
+    # Finite burn2
+    burn_elapsed = 0.0
+    while burn_elapsed < BURN2_DURATION_SEC:
+        mh = burn2_start_h + burn_elapsed / 3600
+        if step % 6 == 0:
+            add_pt(mh, st[:3], mag(st[3:]))
+        this_dt = min(dt, BURN2_DURATION_SEC - burn_elapsed)
+        moon_pos = moon_pos_at_met(mh + 0.5 * this_dt / 3600)
+        st = rk4_step(st, this_dt, moon_pos=moon_pos)
+        vd = norm(st[3:]); rd = norm(st[:3])
+        dv_scale = this_dt / BURN2_DURATION_SEC
+        st[3] += vd[0] * dv2o * dv_scale + rd[0] * dv2ro * dv_scale
+        st[4] += vd[1] * dv2o * dv_scale + rd[1] * dv2ro * dv_scale
+        st[5] += vd[2] * dv2o * dv_scale + rd[2] * dv2ro * dv_scale
+        burn_elapsed += this_dt; step += 1
 
-    # Segment 2: burn2 → Horizons
-    seg2 = (first_met_h - BURN2_H) * 3600
+    # Segment 2: burn2 end → Horizons
+    seg2 = (first_met_h - burn2_end_h) * 3600
     elapsed = 0.0; step = 0
     while elapsed < seg2:
-        mh = BURN2_H + elapsed / 3600
+        mh = burn2_end_h + elapsed / 3600
         if step % 6 == 0:
             add_pt(mh, st[:3], mag(st[3:]))
         this_dt = min(dt, seg2 - elapsed)
-        st = rk4_step(st, this_dt, moon_pos=moon_km)
+        moon_pos = moon_pos_at_met(mh + 0.5 * this_dt / 3600)
+        st = rk4_step(st, this_dt, moon_pos=moon_pos)
         elapsed += this_dt; step += 1
 
     # Final point: propagated endpoint (should match r_target exactly)
