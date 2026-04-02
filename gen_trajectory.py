@@ -238,14 +238,12 @@ def rk4_step(state, dt, mu=398600.4418, moon_pos=None, mu_moon=4902.8):
         r3 = r2 * r
         ax, ay, az = -mu*s[0]/r3, -mu*s[1]/r3, -mu*s[2]/r3
 
-        # J2 perturbation disabled: introduces 41km error vs Horizons data.
-        # Likely due to ICRF Z ≠ Earth spin axis (0.004° offset) or
-        # interaction with our simplified orbital model. Needs investigation.
-        # z2_r2 = s[2]**2 / r2
-        # fJ2 = 1.5 * J2 * mu * R_E_J2**2 / (r2 * r3)
-        # ax += fJ2 * s[0] * (5 * z2_r2 - 1)
-        # ay += fJ2 * s[1] * (5 * z2_r2 - 1)
-        # az += fJ2 * s[2] * (5 * z2_r2 - 3)
+        # J2 perturbation (ICRF Z ≈ Earth's north pole)
+        z2_r2 = s[2]**2 / r2
+        fJ2 = 1.5 * J2 * mu * R_E_J2**2 / (r2 * r3)
+        ax += fJ2 * s[0] * (5 * z2_r2 - 1)
+        ay += fJ2 * s[1] * (5 * z2_r2 - 1)
+        az += fJ2 * s[2] * (5 * z2_r2 - 3)
 
         if moon_pos:
             dx = s[0] - moon_pos[0]
@@ -341,7 +339,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     ASCENT_H = 0.13
     BURN1_H = 0.82   # perigee raise (ICPS) ~T+49min
     BURN2_H = 1.8    # apogee raise (ICPS) ~T+1:48, 18min burn
-    dt = 10.0
+    dt = 10.0  # 10-second steps (1s tested: no improvement, 10x slower)
 
     def kepler_solve_burn(M, ecc, a, tol=1e-10):
         E = M
@@ -370,11 +368,11 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         e2r = [-s*e1_base[i] + c*e2_base[i] for i in range(3)]
         return e1r, e2r
 
-    def get_burn1_state(azimuth, ins_peri=INS_PERI, ins_apo=INS_APO, b1h=BURN1_H, m_off=0):
-        """Compute burn1 position/velocity for given launch azimuth and insertion orbit."""
+    def get_burn1_state(azimuth, b1h=BURN1_H, m_off=0):
+        """Compute burn1 position/velocity on fixed 27x2222km insertion orbit."""
         e1r, e2r = rotate_basis(azimuth)
-        a = (ins_peri + ins_apo) / 2
-        e = (ins_apo - ins_peri) / (ins_apo + ins_peri)
+        a = a_ins
+        e = e_ins
         omega = math.sqrt(MU / a**3)
         M = omega * b1h * 3600 + m_off
         nu, r_mag = kepler_solve_burn(M, e, a)
@@ -384,8 +382,8 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         v_mag = v_at(r_mag, a)
         return r, scale_vec(v_dir, v_mag), v_dir, norm(r)
 
-    def propagate(dv1, dv2, dv1r, dv2r, azimuth, ins_peri=INS_PERI, ins_apo=INS_APO, b1h=BURN1_H, b2h=BURN2_H, m_off=0):
-        r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(azimuth, ins_peri, ins_apo, b1h, m_off)
+    def propagate(dv1, dv2, dv1r, dv2r, azimuth, b1h=BURN1_H, b2h=BURN2_H, m_off=0):
+        r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(azimuth, b1h, m_off)
         v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1), scale_vec(r_b1_hat, dv1r)))
         st = list(r_b1) + v_after
         elapsed = 0.0; seg1 = (b2h - b1h) * 3600
@@ -402,31 +400,19 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
             elapsed += min(dt, seg2 - elapsed)
         return st[:3], st[3:]
 
-    def cost_vec(x):
-        # x = [dv1, dv2, dv1r, dv2r, azimuth, ins_peri, ins_apo]
-        try:
-            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
-            pe = mag([pos[i] - r_target[i] for i in range(3)])
-            ve = mag([vel[i] - v_target[i] for i in range(3)]) * 1000
-            return pe + ve
-        except:
-            return 1e12
-
-    # 9 params: Δv (4) + azimuth + insertion orbit (2) + burn effective times (2)
-    # Burn times are optimizable: impulsive approximation of finite-duration burns
-    # means the "effective time" differs from the start/end time
-    x0 = [dv1_nom, dv2_nom, 0, 0, 0, INS_PERI, INS_APO, BURN1_H, BURN2_H, 0]
+    # 9 params: Δv (4) + azimuth + burn times (2) + insertion orbit adjustment (2)
+    # Insertion orbit starts at 27×2222km, allowed ±10% adjustment
+    x0 = [dv1_nom, dv2_nom, 0, 0, 0, BURN1_H, BURN2_H, 1.0, 1.0]
     bounds = [
         (-0.5, 1.0),            # dv1
         (1.5, 3.5),             # dv2
         (-0.3, 0.3),            # dv1r
         (-0.3, 0.3),            # dv2r
         (-0.2, 0.2),            # azimuth
-        (R_E - 200, R_E + 200), # ins_peri
-        (R_E + 500, R_E + 5000),# ins_apo
         (0.6, 1.1),             # burn1 effective time
         (1.5, 2.2),             # burn2 effective time
-        (-3.14, 3.14),          # M_offset (mean anomaly offset, radians)
+        (0.85, 1.15),           # ins_peri scale (±15%)
+        (0.85, 1.15),           # ins_apo scale
     ]
 
     def cost_bounded(x):
@@ -434,34 +420,74 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
             if x[i] < lo or x[i] > hi:
                 return 1e12
         try:
-            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8], x[9])
+            # Temporarily adjust insertion orbit
+            nonlocal a_ins, e_ins, omega_ins
+            ip = INS_PERI * x[7] + R_E * (1 - x[7])  # scale altitude, not radius
+            ia = INS_APO * x[8] + R_E * (1 - x[8])
+            a_ins = (ip + ia) / 2
+            e_ins = (ia - ip) / (ia + ip)
+            omega_ins = math.sqrt(MU / a_ins**3)
+            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
             pe = mag([pos[i] - r_target[i] for i in range(3)])
             ve = mag([vel[i] - v_target[i] for i in range(3)]) * 1000
             return pe + ve
         except:
             return 1e12
+        finally:
+            # Restore
+            a_ins = (INS_PERI + INS_APO) / 2
+            e_ins = (INS_APO - INS_PERI) / (INS_APO + INS_PERI)
+            omega_ins = math.sqrt(MU / a_ins**3)
 
-    result = minimize(cost_bounded, x0, method='Nelder-Mead',
-                      options={'maxiter': 20000, 'xatol': 1e-6, 'fatol': 0.01, 'adaptive': True})
+    # Stage 1: match position (fast convergence)
+    res1 = minimize(cost_bounded, x0, method='Nelder-Mead',
+                    options={'maxiter': 10000, 'xatol': 1e-5, 'fatol': 0.1, 'adaptive': True})
 
-    dv1o, dv2o, dv1ro, dv2ro, az_opt, ins_peri_opt, ins_apo_opt, b1h_opt, b2h_opt, m_offset_opt = result.x
-    fp, fv = propagate(dv1o, dv2o, dv1ro, dv2ro, az_opt, ins_peri_opt, ins_apo_opt, b1h_opt, b2h_opt, m_offset_opt)
+    # Stage 2: refine velocity from Stage 1 result (higher velocity weight)
+    def cost_vel_focus(x):
+        for i, (lo, hi) in enumerate(bounds):
+            if x[i] < lo or x[i] > hi:
+                return 1e12
+        try:
+            nonlocal a_ins, e_ins, omega_ins
+            ip = INS_PERI * x[7] + R_E * (1 - x[7])
+            ia = INS_APO * x[8] + R_E * (1 - x[8])
+            a_ins = (ip + ia) / 2
+            e_ins = (ia - ip) / (ia + ip)
+            omega_ins = math.sqrt(MU / a_ins**3)
+            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+            pe = mag([pos[i] - r_target[i] for i in range(3)])
+            ve = mag([vel[i] - v_target[i] for i in range(3)]) * 2000  # 2x higher velocity weight
+            return pe + ve
+        except:
+            return 1e12
+        finally:
+            a_ins = (INS_PERI + INS_APO) / 2
+            e_ins = (INS_APO - INS_PERI) / (INS_APO + INS_PERI)
+            omega_ins = math.sqrt(MU / a_ins**3)
+
+    result = minimize(cost_vel_focus, list(res1.x), method='Nelder-Mead',
+                      options={'maxiter': 20000, 'xatol': 1e-7, 'fatol': 0.001, 'adaptive': True})
+
+    dv1o, dv2o, dv1ro, dv2ro, az_opt, b1h_opt, b2h_opt, peri_scale, apo_scale = result.x
+    # Apply final orbit adjustment
+    INS_PERI_FINAL = INS_PERI * peri_scale + R_E * (1 - peri_scale)
+    INS_APO_FINAL = INS_APO * apo_scale + R_E * (1 - apo_scale)
+    a_ins = (INS_PERI_FINAL + INS_APO_FINAL) / 2
+    e_ins = (INS_APO_FINAL - INS_PERI_FINAL) / (INS_APO_FINAL + INS_PERI_FINAL)
+    omega_ins = math.sqrt(MU / a_ins**3)
+    fp, fv = propagate(dv1o, dv2o, dv1ro, dv2ro, az_opt, b1h_opt, b2h_opt)
     pe = mag([fp[i]-r_target[i] for i in range(3)])
     va = math.degrees(math.acos(max(-1, min(1, dot(norm(fv), norm(v_target))))))
     print(f"  Optimized ({result.nfev} evals): dv1={dv1o*1000:.0f}+{dv1ro*1000:.0f}r, "
           f"dv2={dv2o*1000:.0f}+{dv2ro*1000:.0f}r, az={math.degrees(az_opt):.1f}deg, "
-          f"peri={ins_peri_opt-R_E:.0f}km, apo={ins_apo_opt-R_E:.0f}km, "
-          f"b1={b1h_opt:.3f}h, b2={b2h_opt:.3f}h, M0={math.degrees(m_offset_opt):.1f}deg, "
+          f"b1={b1h_opt:.3f}h, b2={b2h_opt:.3f}h, "
+          f"peri={INS_PERI_FINAL-R_E:.0f}km({peri_scale:.3f}), apo={INS_APO_FINAL-R_E:.0f}km({apo_scale:.3f}), "
           f"pos={pe:.0f}km, vel={va:.1f}deg", file=sys.stderr)
 
     # Use optimized values for trajectory generation
     e1, e2 = rotate_basis(az_opt)
-    a_ins = (ins_peri_opt + ins_apo_opt) / 2
-    e_ins = (ins_apo_opt - ins_peri_opt) / (ins_apo_opt + ins_peri_opt)
-    p_ins = a_ins * (1 - e_ins**2)
-    omega_ins = math.sqrt(MU / a_ins**3)
-    INS_PERI = ins_peri_opt
-    INS_APO = ins_apo_opt
+    # a_ins, e_ins, omega_ins already set from fixed INS_PERI/INS_APO
     BURN1_H = b1h_opt
     BURN2_H = b2h_opt
 
@@ -497,7 +523,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
     # Phase 0: Ascent (T+0 to T+0.13h)
     # At MECO (T+8min), spacecraft is already on the 27x2222km insertion orbit.
     # Ascent smoothly transitions from ground to Kepler orbit position.
-    M_meco = omega_ins * ASCENT_H * 3600 + m_offset_opt
+    M_meco = omega_ins * ASCENT_H * 3600 + 0
     nu_meco, r_meco = kepler_solve(M_meco, e_ins)
     r_meco = max(r_meco, R_E + 10)
 
@@ -519,7 +545,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         ts = ASCENT_H * 3600 + i * 10
         met_h = ts / 3600
         if met_h > BURN1_H: break
-        M = omega_ins * ts + m_offset_opt
+        M = omega_ins * ts + 0
         nu, r = kepler_solve(M, e_ins)
         r = max(r, R_E + 10)
         # Position in orbital plane using true anomaly
@@ -528,7 +554,7 @@ def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
         add_pt(met_h, pos, v_at(r, a_ins))
 
     # Phase 2+3: Two burns + propagation (mirroring propagate() exactly)
-    r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(az_opt, ins_peri_opt, ins_apo_opt, b1h_opt, m_offset_opt)
+    r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(az_opt, b1h_opt)
     v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1o), scale_vec(r_b1_hat, dv1ro)))
     st = list(r_b1) + v_after
 
