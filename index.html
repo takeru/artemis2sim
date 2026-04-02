@@ -84,6 +84,14 @@ canvas{display:block}
 #clock-met{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:1px;text-shadow:0 2px 8px rgba(0,0,0,0.6)}
 #clock-local{font-size:14px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
 
+/* Help overlay */
+#help-overlay{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;cursor:pointer}
+#help-content{background:var(--panel);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:20px 28px;max-width:320px;cursor:default}
+#help-content h3{font-size:16px;margin-bottom:12px;color:var(--cyan)}
+#help-content dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+#help-content dt{color:var(--text);font-weight:600}
+#help-content dd{color:var(--muted)}
+
 /* Event banner */
 #event-banner{position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(255,152,0,0.9);color:#000;padding:6px 20px;border-radius:4px;font-size:14px;font-weight:600;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap}
 
@@ -124,6 +132,12 @@ canvas{display:block}
       <button class="cam-btn" data-cam="earth" onclick="setCam('earth')">地球</button>
       <button class="cam-btn" data-cam="moon" onclick="setCam('moon')">月</button>
     </div>
+    <button onclick="document.getElementById('help-overlay').style.display='flex'" style="background:none;border:1px solid var(--muted);color:var(--muted);width:24px;height:24px;border-radius:50%;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center">?</button>
+    <select id="line-width" onchange="setLineWidth(this.value)" style="background:var(--bg);border:1px solid var(--muted);color:var(--text);padding:3px 6px;border-radius:3px;font-size:11px">
+      <option value="1">細</option>
+      <option value="2" selected>中</option>
+      <option value="3">太</option>
+    </select>
     <button id="share-btn" onclick="shareOnTwitter()">共有</button>
   </div>
 </div>
@@ -144,6 +158,21 @@ canvas{display:block}
 </div>
 
 <div id="event-banner"></div>
+<div id="help-overlay" onclick="this.style.display='none'" style="display:none">
+  <div id="help-content">
+    <h3>操作方法</h3>
+    <dl>
+      <dt>左ドラッグ</dt><dd>回転</dd>
+      <dt>右ドラッグ</dt><dd>平行移動</dd>
+      <dt>スクロール</dt><dd>ズーム</dd>
+      <dt>タイムライン</dt><dd>ミッション時刻を移動</dd>
+      <dt>再生ボタン</dt><dd>アニメーション開始/停止</dd>
+      <dt>速度ボタン</dt><dd>再生速度切り替え</dd>
+      <dt>カメラボタン</dt><dd>視点切り替え（自由/宇宙船/地球/月）</dd>
+    </dl>
+    <p style="font-size:11px;color:var(--muted);margin-top:12px">クリックで閉じる</p>
+  </div>
+</div>
 <div id="phase-markers"></div>
 
 <div id="controls">
@@ -184,6 +213,9 @@ canvas{display:block}
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 // ============================================================
 // Constants
@@ -337,6 +369,13 @@ texLoader.load(
 const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 32), moonMat);
 moonMesh.scale.setScalar(moonR);
 moonGroup.add(moonMesh);
+
+// Moon locator ring (visible when far from camera)
+const moonRingGeo = new THREE.RingGeometry(1.5, 1.7, 64);
+const moonRingMat = new THREE.MeshBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0, side: THREE.DoubleSide });
+const moonRing = new THREE.Mesh(moonRingGeo, moonRingMat);
+moonGroup.add(moonRing);
+
 scene.add(moonGroup);
 
 // Moon orbit trail (built from trajectory data after load)
@@ -391,8 +430,8 @@ const KSC_ECEF = [
 scene.add(kscMarker);
 
 // Locator ring — "このあたりにいる"
-const ringGeo = new THREE.RingGeometry(1.5, 1.65, 64);
-const ringMat = new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.25, side: THREE.DoubleSide });
+const ringGeo = new THREE.RingGeometry(1.5, 1.7, 64);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, side: THREE.DoubleSide });
 const scRing = new THREE.Mesh(ringGeo, ringMat);
 scGroup.add(scRing);
 
@@ -404,7 +443,10 @@ const commLineMat = new THREE.LineBasicMaterial({ color: 0x44ff88, transparent: 
 const commLine = new THREE.Line(commLineGeo, commLineMat);
 scene.add(commLine);
 
-// Build trajectory line from real data with spline interpolation
+// Build trajectory line from real data with spline interpolation (Line2 for variable width)
+let trajLineMat = null;
+let currentLineWidth = 2;
+
 function buildTrajectoryLine() {
   if (trajLine) scene.remove(trajLine);
   const pts = horizData.points;
@@ -421,28 +463,40 @@ function buildTrajectoryLine() {
   const subdivisions = 4000;
   const curvePoints = curve.getPoints(subdivisions);
 
-  const positions = new Float32Array(curvePoints.length * 3);
-  const colors = new Float32Array(curvePoints.length * 3);
+  const positions = [];
+  const colors = [];
   for (let i = 0; i < curvePoints.length; i++) {
     const p = curvePoints[i];
-    positions[i*3] = p.x; positions[i*3+1] = p.y; positions[i*3+2] = p.z;
-    // Map curve parameter to MET for coloring
+    positions.push(p.x, p.y, p.z);
     const t = i / curvePoints.length;
     const metH = pts[0].met + t * (pts[pts.length-1].met - pts[0].met);
     let pi = PHASES.findIndex(ph => metH >= ph.start && metH < ph.end);
     if (pi < 0) pi = PHASES.length - 1;
     const c = phaseColors[pi];
-    colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+    colors.push(c.r, c.g, c.b);
   }
 
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  trajLine = new THREE.Line(geo, new THREE.LineBasicMaterial({
-    vertexColors: true, transparent: true, opacity: 0.6
-  }));
+  const geo = new LineGeometry();
+  geo.setPositions(positions);
+  geo.setColors(colors);
+
+  trajLineMat = new LineMaterial({
+    vertexColors: true, transparent: true, opacity: 0.6,
+    linewidth: currentLineWidth,
+    resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
+  });
+
+  trajLine = new Line2(geo, trajLineMat);
+  trajLine.computeLineDistances();
   scene.add(trajLine);
 }
+
+window.setLineWidth = (val) => {
+  currentLineWidth = parseInt(val);
+  if (trajLineMat) {
+    trajLineMat.linewidth = currentLineWidth;
+  }
+};
 
 // ============================================================
 // Explanation Content
@@ -723,8 +777,13 @@ function animate(now) {
     updateFrame(metHours);
   }
 
-  // Locator ring always faces camera
+  // Locator rings always face camera
   scRing.lookAt(camera.position);
+  moonRing.lookAt(camera.position);
+
+  // Moon ring: visible when camera is far, fades when close
+  const moonCamDist = camera.position.distanceTo(moonGroup.position);
+  moonRingMat.opacity = Math.min(0.5, Math.max(0, (moonCamDist - 10) / 20));
 
   // Glow pulse
   scGlow.material.opacity = 0.25 + 0.15 * Math.sin(now * 0.003);
@@ -806,6 +865,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (trajLineMat) trajLineMat.resolution.set(window.innerWidth, window.innerHeight);
 });
 
 init();
