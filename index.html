@@ -48,7 +48,9 @@ canvas{display:block}
 #tli-control{margin-top:16px;padding:12px;background:rgba(255,152,0,0.08);border-radius:6px;border:1px solid rgba(255,152,0,0.2)}
 #tli-control label{font-size:12px;color:var(--amber);font-weight:600;display:block;margin-bottom:6px}
 #tli-control input[type=range]{width:100%;accent-color:var(--amber)}
-#tli-control .tli-value{font-size:11px;color:var(--muted);margin-top:4px}
+.tli-step{background:none;border:1px solid var(--amber);color:var(--amber);padding:4px 6px;border-radius:3px;font-size:11px;cursor:pointer;font-weight:600;min-width:32px}
+.tli-step:hover{background:var(--amber);color:var(--bg)}
+#tli-dv-input::-webkit-inner-spin-button{opacity:0.3}
 #tli-result{margin-top:8px;font-size:12px;padding:6px 8px;border-radius:4px}
 #tli-result.success{background:rgba(68,255,136,0.1);color:var(--success)}
 #tli-result.danger{background:rgba(255,68,68,0.1);color:var(--danger)}
@@ -57,6 +59,8 @@ canvas{display:block}
 #controls{position:fixed;bottom:60px;left:0;right:0;z-index:10;display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--panel);backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,0.08)}
 #play-btn{width:36px;height:36px;border-radius:50%;border:1px solid var(--cyan);background:none;color:var(--cyan);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 #play-btn:hover{background:var(--cyan);color:var(--bg)}
+.ctrl-btn{width:32px;height:32px;border-radius:4px;border:1px solid var(--muted);background:none;color:var(--muted);font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;user-select:none}
+.ctrl-btn:hover,.ctrl-btn:active{border-color:var(--cyan);color:var(--cyan)}
 #speed-btn{background:none;border:1px solid var(--muted);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;cursor:pointer;flex-shrink:0;min-width:48px}
 #timeline{flex:1;height:6px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,0.1);border-radius:3px;outline:none;cursor:pointer;touch-action:none}
 #timeline::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--cyan);cursor:pointer}
@@ -78,6 +82,11 @@ canvas{display:block}
 #comm-status.ok{background:rgba(68,255,136,0.15);color:var(--success)}
 #comm-status.blackout{background:rgba(255,68,68,0.15);color:var(--danger);animation:blink 1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0.5}}
+
+/* Legend */
+#legend{position:fixed;bottom:126px;left:10px;z-index:10;font-size:10px;display:flex;flex-wrap:wrap;gap:2px 8px;pointer-events:none}
+.legend-item{display:flex;align-items:center;gap:3px}
+.legend-dot{width:8px;height:3px;border-radius:1px}
 
 /* Clock */
 #clock{position:fixed;top:52px;left:16px;z-index:10;pointer-events:none}
@@ -171,6 +180,7 @@ canvas{display:block}
       <button class="cam-btn" data-cam="earth" onclick="setCam('earth')">地球</button>
       <button class="cam-btn" data-cam="moon" onclick="setCam('moon')">月</button>
     </div>
+    <button id="grid-btn" class="cam-btn active" onclick="toggleGrid()">格子</button>
     <button onclick="document.getElementById('help-overlay').style.display='flex'" style="background:none;border:1px solid var(--muted);color:var(--muted);width:24px;height:24px;border-radius:50%;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center">?</button>
     <select id="line-width" onchange="setLineWidth(this.value)" style="background:var(--bg);border:1px solid var(--muted);color:var(--text);padding:3px 6px;border-radius:3px;font-size:11px">
       <option value="1">細</option>
@@ -189,25 +199,56 @@ canvas{display:block}
   <div class="detail-content" id="detail-content"></div>
   <div class="glossary" id="glossary" style="display:none"></div>
   <div id="tli-control">
-    <label>月への押し出し（TLI）の強さ</label>
-    <input type="range" id="tli-slider" min="97" max="103" value="100" step="0.1">
-    <div class="tli-value">Δv: <span id="tli-pct">100.0</span>%  <span id="tli-dv-abs"></span></div>
+    <label>TLI 速度</label>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+      <button class="tli-step" onclick="adjustDv(-10)">-10</button>
+      <button class="tli-step" onclick="adjustDv(-1)">-1</button>
+      <div style="position:relative;flex:1">
+        <input type="number" id="tli-dv-input" value="10645" step="1" style="width:100%;background:var(--bg);border:1px solid var(--amber);color:var(--text);padding:6px 40px 6px 8px;border-radius:4px;font-size:16px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums">
+        <span style="position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:12px;pointer-events:none">m/s</span>
+      </div>
+      <button class="tli-step" onclick="adjustDv(+1)">+1</button>
+      <button class="tli-step" onclick="adjustDv(+10)">+10</button>
+    </div>
+    <input type="range" id="tli-slider" min="10300" max="11100" value="10645" step="1" style="width:100%;accent-color:var(--amber)">
+    <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-top:2px;padding:0 2px">
+      <span>月に届かない</span>
+      <span style="color:var(--amber)">▲ 名目 10,645</span>
+      <span>脱出 10,966 ▶</span>
+    </div>
     <div id="tli-result" class="success">名目軌道（実データ）</div>
   </div>
 </div>
 
+<div id="legend">
+  <span class="legend-item"><span class="legend-dot" style="background:#ff6644"></span>上昇</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#88ccff"></span>投入</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#44ddaa"></span>PRM後</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#aadd44"></span>ARM後</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#4fc3f7"></span>周回/巡航</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#ff9800"></span>TLI/帰還</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#e040fb"></span>フライバイ</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#ff4444"></span>再突入</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#ff9800;border-radius:50%;width:6px;height:6px"></span>イベント</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#ffff44"></span>シミュ(名目)</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#44ff88"></span>シミュ(帰還)</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#ff4444;opacity:0.8"></span>シミュ(脱出)</span>
+</div>
 <div id="event-banner"></div>
 <div id="help-overlay" onclick="this.style.display='none'" style="display:none">
   <div id="help-content">
     <h3>操作方法</h3>
     <dl>
-      <dt>ドラッグ / 1本指</dt><dd>回転</dd>
-      <dt>右ドラッグ / 2本指ドラッグ</dt><dd>平行移動</dd>
+      <dt>ドラッグ / 1本指</dt><dd>平行移動</dd>
+      <dt>右ドラッグ / 2本指回転</dt><dd>回転（中心=地球）</dd>
       <dt>スクロール / ピンチ</dt><dd>ズーム</dd>
       <dt>タイムライン</dt><dd>ミッション時刻を移動</dd>
       <dt>▶ ボタン</dt><dd>再生/停止</dd>
       <dt>速度ボタン</dt><dd>再生速度切り替え</dd>
       <dt>カメラボタン</dt><dd>視点切り替え</dd>
+      <dt>◀◀ / ▶▶ ボタン</dt><dd>押しっぱなしで巻き戻し/早送り</dd>
+      <dt>← → キー</dt><dd>巻き戻し/早送り（押しっぱなし対応）</dd>
+      <dt>スペースキー</dt><dd>再生/停止</dd>
       <dt>TLIスライダー</dt><dd>噴射量を変えて軌道シミュレーション</dd>
     </dl>
     <p style="font-size:11px;color:var(--muted);margin-top:12px">クリックで閉じる</p>
@@ -216,7 +257,9 @@ canvas{display:block}
 <div id="phase-markers"></div>
 
 <div id="controls">
+  <button class="ctrl-btn" id="rw-btn" onmousedown="startScrub(-1)" onmouseup="stopScrub()" onmouseleave="stopScrub()" ontouchstart="startScrub(-1)" ontouchend="stopScrub()">&#9664;&#9664;</button>
   <button id="play-btn" onclick="togglePlay()">&#9654;&#xFE0E;</button>
+  <button class="ctrl-btn" id="ff-btn" onmousedown="startScrub(1)" onmouseup="stopScrub()" onmouseleave="stopScrub()" ontouchstart="startScrub(1)" ontouchend="stopScrub()">&#9654;&#9654;</button>
   <button id="speed-btn" onclick="cycleSpeed()">100x</button>
   <input type="range" id="timeline" min="0" max="1000" value="0" step="1">
   <div id="met-display">T+ 0日 00:00</div>
@@ -271,12 +314,16 @@ const GM_MOON = 4903;               // km^3/s^2
 
 // Mission timeline (MET in hours) — from NASA press kit
 const PHASES = [
-  { name: '地球周回', start: 0,     end: 25.6,  color: '#4fc3f7' },
-  { name: 'TLI',     start: 25.6,  end: 27,    color: '#ff9800' },
-  { name: '月への巡航', start: 27,  end: 103,   color: '#4fc3f7' },
-  { name: '月フライバイ', start: 103, end: 139.8, color: '#e040fb' },
-  { name: '地球帰還', start: 139.8, end: 215,   color: '#ff9800' },
-  { name: '再突入',   start: 215,   end: 217.8, color: '#ff4444' },
+  { name: '打ち上げ上昇', start: 0,     end: 0.13,  color: '#ff6644' },  // launch ascent (atmospheric)
+  { name: '投入軌道',     start: 0.13,  end: 0.82,  color: '#88ccff' },  // insertion orbit → burn1
+  { name: '近地点上昇後', start: 0.82,  end: 1.8,   color: '#44ddaa' },  // burn1 → burn2
+  { name: '高楕円軌道',   start: 1.8,   end: 3.4,   color: '#aadd44' },  // burn2 → Horizons
+  { name: 'チェックアウト', start: 3.4,  end: 24.5,  color: '#4fc3f7' },  // Horizons → TLI
+  { name: 'TLI',         start: 24.5,  end: 26,    color: '#ff9800' },
+  { name: '月への巡航',   start: 26,    end: 110,   color: '#4fc3f7' },
+  { name: '月フライバイ', start: 110,   end: 135,   color: '#e040fb' },
+  { name: '地球帰還',     start: 135,   end: 212,   color: '#ff9800' },
+  { name: '再突入',       start: 212,   end: 220,   color: '#ff4444' },
 ];
 
 // ============================================================
@@ -284,8 +331,8 @@ const PHASES = [
 // ============================================================
 let playing = false;
 let speedMultiplier = 100;
-const speeds = [1, 10, 100, 1000, 10000];
-let speedIdx = 2;
+const speeds = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000];
+let speedIdx = 4;
 let metHours = 3.6;
 let horizData = null;
 let trajCurve = null;
@@ -316,7 +363,7 @@ function interpAt(metH) {
   }
   const a = pts[lo], b = pts[hi];
   const t = (metH - a.met) / (b.met - a.met);
-  return {
+  const result = {
     x: a.x + (b.x - a.x) * t,
     y: a.y + (b.y - a.y) * t,
     z: a.z + (b.z - a.z) * t,
@@ -328,6 +375,13 @@ function interpAt(metH) {
     dM: a.dM + (b.dM - a.dM) * t,
     met: metH,
   };
+  // Interpolate velocity vectors if available
+  if (a.vx !== undefined && b.vx !== undefined) {
+    result.vx = a.vx + (b.vx - a.vx) * t;
+    result.vy = a.vy + (b.vy - a.vy) * t;
+    result.vz = a.vz + (b.vz - a.vz) * t;
+  }
+  return result;
 }
 
 // ============================================================
@@ -369,19 +423,24 @@ function simRK4(state, dt, moonKm) {
 
 // Find TLI point in trajectory data and extract state in km
 function getTLIState() {
-  const TLI_MET = 25.6; // hours
-  const d = interpAt(TLI_MET);
-  const pos = [d.x * KM_PER_UNIT, d.y * KM_PER_UNIT, d.z * KM_PER_UNIT];
-  // Compute velocity from finite difference
-  const d2 = interpAt(TLI_MET + 0.01);
-  const dt = 0.01 * 3600; // seconds
-  const vel = [
-    (d2.x - d.x) * KM_PER_UNIT / dt,
-    (d2.y - d.y) * KM_PER_UNIT / dt,
-    (d2.z - d.z) * KM_PER_UNIT / dt,
-  ];
-  const moonKm = [d.mx * KM_PER_UNIT, d.my * KM_PER_UNIT, d.mz * KM_PER_UNIT];
-  return { pos, vel, moonKm, met: TLI_MET };
+  // Find peak speed near perigee (MET 24-26h) = TLI point
+  const pts = horizData.points;
+  let best = null;
+  for (const p of pts) {
+    if (p.met >= 24 && p.met <= 26 && p.vx !== undefined) {
+      if (!best || p.spd > best.spd) best = p;
+    }
+  }
+  if (!best) {
+    // Fallback to MET 25.0
+    best = pts.find(p => p.met >= 25.0 && p.vx !== undefined) || pts[Math.floor(pts.length/2)];
+  }
+  const pos = [best.x * KM_PER_UNIT, best.y * KM_PER_UNIT, best.z * KM_PER_UNIT];
+  // Use Horizons velocity vectors directly (km/s)
+  const vel = [best.vx, best.vy, best.vz];
+  const moonKm = [best.mx * KM_PER_UNIT, best.my * KM_PER_UNIT, best.mz * KM_PER_UNIT];
+  console.log(`TLI state: MET=${best.met}h, speed=${best.spd} km/s, vel=[${vel.map(v=>v.toFixed(3))}]`);
+  return { pos, vel, moonKm, met: best.met };
 }
 
 // Simulate orbit from TLI with modified Δv
@@ -398,11 +457,13 @@ function simulateFromTLI(dvScale) {
   ];
 
   const dtSec = 120;
-  const totalHours = 190;
-  const totalSteps = Math.floor(totalHours * 3600 / dtSec);
+  const nominalHours = 190;    // nominal mission duration after TLI
+  const extendedHours = 400;   // extended simulation
+  const totalSteps = Math.floor(extendedHours * 3600 / dtSec);
   const sampleEvery = 5;
 
-  const points = [];
+  const mainPoints = [];   // nominal period
+  const extPoints = [];    // extended (dotted)
   let closestMoonKm = Infinity;
   let closestMoonMetH = 0;
   let crashed = false;
@@ -413,7 +474,6 @@ function simulateFromTLI(dvScale) {
     const dMoon = interpAt(Math.min(metH, horizData.last_met_h));
     const moonKm = [dMoon.mx * KM_PER_UNIT, dMoon.my * KM_PER_UNIT, dMoon.mz * KM_PER_UNIT];
 
-    // Track closest approach to Moon
     const dmx = state[0] - moonKm[0], dmy = state[1] - moonKm[1], dmz = state[2] - moonKm[2];
     const distMoon = Math.sqrt(dmx*dmx + dmy*dmy + dmz*dmz);
     if (distMoon < closestMoonKm) {
@@ -423,46 +483,72 @@ function simulateFromTLI(dvScale) {
 
     if (step % sampleEvery === 0) {
       const r = Math.sqrt(state[0]**2 + state[1]**2 + state[2]**2);
-      points.push(state[0]/KM_PER_UNIT, state[1]/KM_PER_UNIT, state[2]/KM_PER_UNIT);
+      const px = state[0]/KM_PER_UNIT, py = state[1]/KM_PER_UNIT, pz = state[2]/KM_PER_UNIT;
+      const elapsedH = step * dtSec / 3600;
+
+      if (elapsedH <= nominalHours) {
+        mainPoints.push(px, py, pz);
+      } else {
+        extPoints.push(px, py, pz);
+      }
+
       if (r < 6378) { crashed = true; break; }
-      if (r > 500000) { escaped = true; break; }
+      if (r > 600000) { escaped = true; break; }
     }
 
     state = simRK4(state, dtSec, moonKm);
   }
 
-  // Check if it returns near Earth
   const finalR = Math.sqrt(state[0]**2 + state[1]**2 + state[2]**2);
 
-  return { points, closestMoonKm, closestMoonMetH, crashed, escaped, finalR };
+  return { mainPoints, extPoints, closestMoonKm, closestMoonMetH, crashed, escaped, finalR };
 }
 
-// Build/update simulation trajectory line
+// Build/update simulation trajectory lines (solid + dashed extension)
+let simLineExt = null;
+let simLineExtMat = null;
+
 function updateSimLine(dvScale) {
   if (simLine) scene.remove(simLine);
-  // Always simulate (including 100% to show model vs real data difference)
+  if (simLineExt) scene.remove(simLineExt);
+  simLine = null; simLineExt = null;
 
   const result = simulateFromTLI(dvScale);
-  if (result.points.length < 6) return;
-
-  const geo = new LineGeometry();
-  geo.setPositions(result.points);
 
   // Color: yellow at 100% (model vs real), green if returns, red if crash/escape
   let color;
-  if (Math.abs(dvScale - 1.0) < 0.0005) color = 0xffff44; // 100%: yellow (model comparison)
+  if (Math.abs(dvScale - 1.0) < 0.0005) color = 0xffff44;
   else if (result.crashed || result.escaped || result.closestMoonKm < 1737) color = 0xff4444;
   else color = 0x44ff88;
 
-  simLineMat = new LineMaterial({
-    color, transparent: true, opacity: 0.8,
-    linewidth: currentLineWidth,
-    resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
-  });
+  // Main line (solid, nominal period)
+  if (result.mainPoints.length >= 6) {
+    const geo = new LineGeometry();
+    geo.setPositions(result.mainPoints);
+    simLineMat = new LineMaterial({
+      color, transparent: true, opacity: 0.8,
+      linewidth: currentLineWidth,
+      resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
+    });
+    simLine = new Line2(geo, simLineMat);
+    simLine.computeLineDistances();
+    scene.add(simLine);
+  }
 
-  simLine = new Line2(geo, simLineMat);
-  simLine.computeLineDistances();
-  scene.add(simLine);
+  // Extended line (dashed)
+  if (result.extPoints.length >= 6) {
+    const geo = new LineGeometry();
+    geo.setPositions(result.extPoints);
+    simLineExtMat = new LineMaterial({
+      color, transparent: true, opacity: 0.4,
+      linewidth: Math.max(1, currentLineWidth - 1),
+      dashed: true, dashScale: 3, dashSize: 1, gapSize: 1,
+      resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
+    });
+    simLineExt = new Line2(geo, simLineExtMat);
+    simLineExt.computeLineDistances();
+    scene.add(simLineExt);
+  }
 
   return result;
 }
@@ -473,7 +559,12 @@ function updateSimLine(dvScale) {
 const container = document.getElementById('canvas-container');
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
-camera.position.set(30, 80, 120);
+// Orbital plane normal ≈ (-0.023, -0.473, 0.881)
+// Camera up = orbital plane normal → rotation axes align with orbital plane
+const ORBIT_NORMAL = new THREE.Vector3(-0.023, -0.473, 0.881).normalize();
+camera.up.copy(ORBIT_NORMAL);
+// Initial position: looking down at orbital plane from above
+camera.position.copy(ORBIT_NORMAL.clone().multiplyScalar(130));
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -484,19 +575,52 @@ container.appendChild(renderer.domElement);
 const orbitControls = new OrbitControls(camera, renderer.domElement);
 orbitControls.enableDamping = true;
 orbitControls.dampingFactor = 0.05;
-orbitControls.target.set(-20, -40, -20);
-orbitControls.minDistance = 10;
+orbitControls.target.set(0, 0, 0);  // rotation center = Earth
+orbitControls.minDistance = 3;
 orbitControls.maxDistance = 500;
+// Left drag = pan, right drag = rotate
+orbitControls.mouseButtons = {
+  LEFT: THREE.MOUSE.PAN,
+  MIDDLE: THREE.MOUSE.DOLLY,
+  RIGHT: THREE.MOUSE.ROTATE,
+};
+// Touch: one finger = pan, two fingers = dolly/rotate
+orbitControls.touches = {
+  ONE: THREE.TOUCH.PAN,
+  TWO: THREE.TOUCH.DOLLY_ROTATE,
+};
 
 // Lighting
 scene.add(new THREE.AmbientLight(0x333355, 1.5));
-// Sun direction from JPL Horizons (ICRF, 2026-Apr-02, body ID 10)
-// Normalized: (0.9782, 0.1905, 0.0826) — distance 149.5 million km
-// 10日間のミッション中に太陽方向は約10°しか変化しないため固定値で十分。
-// 地球表面の昼夜はERA（自転角度）で表現される。
+// Sun from JPL Horizons (ICRF, 2026-Apr-02, body ID 10)
+// Direction: (0.9782, 0.1905, 0.0826), distance 149.5 million km
+// 10日間で約10°しか動かないため固定。
+const SUN_DIR = new THREE.Vector3(0.9782, 0.1905, 0.0826).normalize();
+const SUN_DIST = 400; // scene units (visual distance, not real scale)
+
+// Directional light from sun
 const sunLight = new THREE.DirectionalLight(0xffffff, 2);
-sunLight.position.set(0.9782, 0.1905, 0.0826).multiplyScalar(500);
+sunLight.position.copy(SUN_DIR.clone().multiplyScalar(500));
 scene.add(sunLight);
+
+// Sun sphere (glowing)
+const sunGroup = new THREE.Group();
+sunGroup.position.copy(SUN_DIR.clone().multiplyScalar(SUN_DIST));
+const sunMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(8, 24, 24),
+  new THREE.MeshBasicMaterial({ color: 0xffdd44 })
+);
+sunGroup.add(sunMesh);
+// Glow
+const sunGlow = new THREE.Mesh(
+  new THREE.SphereGeometry(12, 24, 24),
+  new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true, opacity: 0.15 })
+);
+sunGroup.add(sunGlow);
+// Point light from sun position
+const sunPointLight = new THREE.PointLight(0xffffff, 0.5, 0);
+sunGroup.add(sunPointLight);
+scene.add(sunGroup);
 
 // Stars
 const starGeo = new THREE.BufferGeometry();
@@ -526,7 +650,7 @@ earthMesh.scale.setScalar(earthR);
 earthGroup.add(earthMesh);
 const atmosMat = new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.12, side: THREE.BackSide });
 const atmosMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 32), atmosMat);
-atmosMesh.scale.setScalar(earthR * 1.08);
+atmosMesh.scale.setScalar((6378 + 100) / SCALE_KM); // 大気圏100km
 earthGroup.add(atmosMesh);
 // ICRF: Earth's rotation axis ≈ Z axis. Three.js sphere pole is Y.
 // Rotate group so pole aligns with Z.
@@ -557,8 +681,106 @@ moonGroup.add(moonRing);
 
 scene.add(moonGroup);
 
+// Rotation helpers: orbital plane grid + XYZ axes (visible during rotation only)
+const rotHelpers = new THREE.Group();
+rotHelpers.visible = true;
+scene.add(rotHelpers);
+
+window.toggleGrid = () => {
+  rotHelpers.visible = !rotHelpers.visible;
+  const btn = document.getElementById('grid-btn');
+  btn.classList.toggle('active', rotHelpers.visible);
+};
+
+// XYZ axes at Earth (R=red/X, G=green/Y, B=blue/Z)
+const axisLen = 15;
+function makeAxis(dir, color) {
+  const pts = [new THREE.Vector3(), new THREE.Vector3(...dir).multiplyScalar(axisLen)];
+  return new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.7 })
+  );
+}
+rotHelpers.add(makeAxis([1,0,0], 0xff4444)); // X = red
+rotHelpers.add(makeAxis([0,1,0], 0x44ff44)); // Y = green
+rotHelpers.add(makeAxis([0,0,1], 0x4444ff)); // Z = blue
+
+// Orbital plane grid (built after data loads)
+let orbitalGrid = null;
+function buildOrbitalGrid() {
+  if (orbitalGrid) rotHelpers.remove(orbitalGrid);
+  if (!horizData) return;
+
+  // Compute orbital plane normal from trajectory (mid-mission points)
+  const pts = horizData.points;
+  const p1 = pts.find(p => p.met > 30 && p.vx !== undefined);
+  const p2 = pts.find(p => p.met > 100 && p.vx !== undefined);
+  if (!p1 || !p2) return;
+
+  const r1 = new THREE.Vector3(p1.x, p1.y, p1.z);
+  const r2 = new THREE.Vector3(p2.x, p2.y, p2.z);
+  const normal = new THREE.Vector3().crossVectors(r1, r2).normalize();
+
+  // Build grid in the orbital plane
+  orbitalGrid = new THREE.Group();
+  const gridSize = 120;
+  const gridStep = 10;
+
+  // Two basis vectors in the orbital plane
+  const e1 = new THREE.Vector3().crossVectors(normal, new THREE.Vector3(0, 0, 1)).normalize();
+  if (e1.length() < 0.1) e1.crossVectors(normal, new THREE.Vector3(1, 0, 0)).normalize();
+  const e2 = new THREE.Vector3().crossVectors(normal, e1).normalize();
+
+  const gridMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.15 });
+
+  for (let i = -gridSize; i <= gridSize; i += gridStep) {
+    // Lines along e1
+    const a1 = e1.clone().multiplyScalar(i).add(e2.clone().multiplyScalar(-gridSize));
+    const b1 = e1.clone().multiplyScalar(i).add(e2.clone().multiplyScalar(gridSize));
+    const g1 = new THREE.BufferGeometry().setFromPoints([a1, b1]);
+    orbitalGrid.add(new THREE.Line(g1, gridMat));
+
+    // Lines along e2
+    const a2 = e2.clone().multiplyScalar(i).add(e1.clone().multiplyScalar(-gridSize));
+    const b2 = e2.clone().multiplyScalar(i).add(e1.clone().multiplyScalar(gridSize));
+    const g2 = new THREE.BufferGeometry().setFromPoints([a2, b2]);
+    orbitalGrid.add(new THREE.Line(g2, gridMat));
+  }
+
+  rotHelpers.add(orbitalGrid);
+}
+
 // Moon orbit trail (built from trajectory data after load)
 let moonOrbitLine = null;
+// 3D event markers on the trajectory
+const eventMarkersGroup = new THREE.Group();
+scene.add(eventMarkersGroup);
+
+function buildEventMarkers() {
+  // Clear existing
+  while (eventMarkersGroup.children.length) eventMarkersGroup.remove(eventMarkersGroup.children[0]);
+  if (!horizData || !horizData.events) return;
+
+  const markerGeo = new THREE.SphereGeometry(0.4, 8, 8);
+  const markerMat = new THREE.MeshBasicMaterial({ color: 0xff9800 });
+
+  horizData.events.forEach(ev => {
+    const d = interpAt(ev.met);
+    if (!d) return;
+    const marker = new THREE.Mesh(markerGeo, markerMat);
+    marker.position.set(d.x, d.y, d.z);
+    eventMarkersGroup.add(marker);
+
+    // Small ring around marker for visibility
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.6, 0.7, 16),
+      new THREE.MeshBasicMaterial({ color: 0xff9800, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+    );
+    ring.position.copy(marker.position);
+    eventMarkersGroup.add(ring);
+  });
+}
+
 function buildMoonOrbitLine() {
   if (moonOrbitLine) scene.remove(moonOrbitLine);
   const pts = horizData.points;
@@ -594,8 +816,8 @@ scGroup.add(scGlow);
 
 // KSC marker (red dot, rotates with Earth)
 const kscMarker = new THREE.Mesh(
-  new THREE.SphereGeometry(0.05, 8, 8),
-  new THREE.MeshBasicMaterial({ color: 0xff0000 })
+  new THREE.CircleGeometry(0.05, 16),
+  new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide })
 );
 // KSC in ECEF (fixed to Earth surface)
 // lat 28.5724°N, lon -80.649°W
@@ -609,8 +831,8 @@ const KSC_ECEF = [
 scene.add(kscMarker);
 
 // Locator ring — "このあたりにいる"
-const ringGeo = new THREE.RingGeometry(1.5, 1.7, 64);
-const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, side: THREE.DoubleSide });
+const ringGeo = new THREE.RingGeometry(1.5, 1.8, 64);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, side: THREE.DoubleSide });
 const scRing = new THREE.Mesh(ringGeo, ringMat);
 scGroup.add(scRing);
 
@@ -631,24 +853,26 @@ function buildTrajectoryLine() {
   const pts = horizData.points;
 
   const phaseColors = [
-    new THREE.Color(0x4fc3f7), new THREE.Color(0xff9800),
-    new THREE.Color(0x4fc3f7), new THREE.Color(0xe040fb),
-    new THREE.Color(0xff9800), new THREE.Color(0xff4444),
+    new THREE.Color(0xff6644),  // 打ち上げ上昇
+    new THREE.Color(0x88ccff),  // 投入軌道
+    new THREE.Color(0x44ddaa),  // 近地点上昇後
+    new THREE.Color(0xaadd44),  // 高楕円軌道
+    new THREE.Color(0x4fc3f7),  // チェックアウト
+    new THREE.Color(0xff9800),  // TLI
+    new THREE.Color(0x4fc3f7),  // 月への巡航
+    new THREE.Color(0xe040fb),  // 月フライバイ
+    new THREE.Color(0xff9800),  // 地球帰還
+    new THREE.Color(0xff4444),  // 再突入
   ];
 
-  // Use CatmullRomCurve3 for smooth interpolation
-  const controlPts = pts.map(p => new THREE.Vector3(p.x, p.y, p.z));
-  const curve = new THREE.CatmullRomCurve3(controlPts, false, 'catmullrom', 0.5);
-  const subdivisions = 4000;
-  const curvePoints = curve.getPoints(subdivisions);
-
+  // Use original data points directly (3000+ points = smooth enough)
+  // This ensures MET-based coloring is accurate
   const positions = [];
   const colors = [];
-  for (let i = 0; i < curvePoints.length; i++) {
-    const p = curvePoints[i];
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
     positions.push(p.x, p.y, p.z);
-    const t = i / curvePoints.length;
-    const metH = pts[0].met + t * (pts[pts.length-1].met - pts[0].met);
+    const metH = p.met;
     let pi = PHASES.findIndex(ph => metH >= ph.start && metH < ph.end);
     if (pi < 0) pi = PHASES.length - 1;
     const c = phaseColors[pi];
@@ -682,16 +906,40 @@ window.setLineWidth = (val) => {
 // ============================================================
 const explanations = [
   {
-    title: '地球周回',
-    desc: '宇宙船はまず地球の周りを回りながら、すべてのシステムが正常に動いているか確認しています。高度約200km、時速28,000km。地球を約90分で1周します。',
-    detail: '打ち上げ後、宇宙船は最初にICPS（暫定極低温推進ステージ）と一緒に地球を周回します。この間にエンジン、生命維持装置、通信、航法の全チェックを行います。すべてOKなら、月への大噴射に進みます。',
-    glossary: { 'LEO（低軌道）': '高度200〜2,000kmの地球周回軌道。ISS もここを飛んでいる。', '周回速度': '約7.8 km/s。これより遅いと落ちる。速いと遠くへ行く。' }
+    title: '打ち上げ上昇',
+    desc: '大気圏内飛行。SLSが垂直に発射され、数秒後から東に傾けていく（重力ターン）。T+2分でSRB分離、T+8分でコアステージMECO。ここまでは大気中なのでケプラー軌道ではない。',
+    detail: '低高度では空気抵抗が大きいのでなるべく垂直に高度を稼ぐ。高度が上がるにつれ水平に加速し、T+8分で高度160km、速度7.5 km/sに達する。',
+    glossary: { '重力ターン': '打ち上げ後に徐々に水平に傾ける操縦。効率的に軌道速度に達するための手法。', 'SRB': '固体ロケットブースター。打ち上げ最初の2分間の推力の大部分を担う。' }
+  },
+  {
+    title: '投入軌道',
+    desc: 'MECO後、ICPSが最後のひと押しで楕円軌道に投入。この軌道は不安定で、すぐに近地点を上げないと大気に再突入する。',
+    detail: 'ICPSのRL10エンジンがコアステージから引き継ぐ。投入軌道の近地点は大気圏すれすれで、1周以内にバーンしないと落下する。',
+    glossary: { '投入軌道': 'ロケットが最初に到達する楕円軌道。安定ではない。', 'MECO': 'メインエンジン停止。コアステージの仕事の終わり。' }
+  },
+  {
+    title: '近地点上昇後',
+    desc: 'ICPSが遠地点付近で44 m/sのバーンを実行。近地点が27km→185kmに上がり、安全な軌道に。これで大気に突入する危険がなくなった。',
+    detail: '近地点を上げるには遠地点でプログレードバーン。たった44 m/sの加速で近地点が158km上がる。オーベルト効果の逆 — 遠地点（速度が遅い場所）でのバーンは近地点を効率的に変える。',
+    glossary: { 'PRM': 'Perigee Raise Maneuver。近地点上昇噴射。' }
+  },
+  {
+    title: '高楕円軌道',
+    desc: 'ICPSが近地点付近で約2,276 m/sの大きなバーン（18分間）。遠地点が2,222km→70,000kmに跳ね上がる。周期23.5時間のチェックアウト軌道に入った。',
+    detail: '近地点（速度が速い場所）でのバーンは遠地点を効率的に上げる（オーベルト効果）。この軌道で約1周しながらシステムチェックを行い、TLIに備える。ICPSの燃料はほぼ使い切り。',
+    glossary: { 'ARM': 'Apogee Raise Maneuver。遠地点上昇噴射。', 'チェックアウト軌道': 'TLI前のシステム確認用の高楕円軌道。' }
+  },
+  {
+    title: 'チェックアウト周回',
+    desc: 'ICPS分離、近接運用デモ（70分間）を経て、約23.5時間かけて地球を1周。遠地点70,000kmまで離れ、また近地点に戻ってくる。全システムの最終確認。',
+    detail: 'T+3:24でICPS分離。クルーがOrionを手動操縦してICPSの周囲を飛行（近接運用デモ）。その後、Orion ESMのAJ10エンジンで微修正しながら次の近地点通過を待つ。',
+    glossary: { '近接運用デモ': 'OrionがICPSの近くで手動操縦する実証試験。将来のドッキングに向けた練習。' }
   },
   {
     title: 'TLI — 月遷移噴射',
-    desc: 'ここがミッション最大の瞬間。エンジンを大きく噴射して、地球の周回軌道から月へ向かうコースに乗ります。速度は秒速10.8kmに。東京から大阪まで約50秒。',
-    detail: 'TLI（Trans-Lunar Injection）は、宇宙船を月へ向かわせる決定的な噴射。ICPSのRL10エンジンが約6分間燃焼し、秒速約3km/sの加速を行います。このΔv（速度変化）の大きさと方向で、月への到達や帰還軌道のすべてが決まります。',
-    glossary: { 'TLI': '月遷移噴射。地球の周り→月行きに切り替える加速。', 'Δv（デルタブイ）': '速度変化量。宇宙船がどれだけ加速するかの尺度。ロケットの「燃費」のようなもの。' }
+    desc: 'ミッション最大の瞬間。Orion ESMのAJ10エンジンが噴射し、チェックアウト軌道の近地点（高度186km）で月への自由帰還軌道に乗る。',
+    detail: 'TLIはICPSではなくOrion自身のESM（欧州サービスモジュール）のAJ10エンジンが実行。近地点での速度は約10,645 m/s。脱出速度（10,966 m/s）との差はわずか321 m/s。',
+    glossary: { 'TLI': '月遷移噴射。チェックアウト軌道から月行きに切り替える加速。', 'ESM': '欧州サービスモジュール。Orionの推進・電力・熱制御を担当。' }
   },
   {
     title: '月への巡航',
@@ -773,49 +1021,93 @@ timeline.addEventListener('input', () => {
   updateFrame(metHours);
 });
 
-// TLI slider — simulates orbit with modified Δv
-document.getElementById('tli-slider').addEventListener('input', (e) => {
-  const val = parseFloat(e.target.value);
-  document.getElementById('tli-pct').textContent = val.toFixed(1);
-  const tli = val / 100;
+// TLI speed control — absolute m/s
+const tliInput = document.getElementById('tli-dv-input');
+const tliSlider = document.getElementById('tli-slider');
+const TLI_NOMINAL = 10645; // m/s (actual peak speed at TLI perigee from Horizons data)
 
-  // Show absolute Δv change
-  const nominalSpeed = 10.8; // km/s approximate
-  const diff = (tli - 1) * nominalSpeed;
-  const absEl = document.getElementById('tli-dv-abs');
-  if (Math.abs(diff) > 0.001) {
-    absEl.textContent = `(${diff > 0 ? '+' : ''}${(diff*1000).toFixed(0)} m/s)`;
-  } else {
-    absEl.textContent = '';
-  }
+function runTliSim(speedMs) {
+  speedMs = Math.max(10600, Math.min(11200, Math.round(speedMs)));
+  tliInput.value = speedMs;
+  tliSlider.value = speedMs;
+
+  const dvScale = speedMs / TLI_NOMINAL;
+  const diff = speedMs - TLI_NOMINAL;
+  const diffStr = diff >= 0 ? `+${diff}` : `${diff}`;
 
   const r = document.getElementById('tli-result');
-  r.textContent = `シミュレーション中...`;
+  r.textContent = `${speedMs.toLocaleString()} m/s (${diffStr}) シミュレーション中...`;
   r.className = '';
 
-  // Debounce: simulate after slider stops moving
   clearTimeout(window._simTimeout);
   window._simTimeout = setTimeout(() => {
     if (!horizData) return;
-    const result = updateSimLine(tli);
+    const result = updateSimLine(dvScale);
     if (result) {
       const moonAlt = Math.max(0, result.closestMoonKm - 1737);
       const days = (result.closestMoonMetH / 24).toFixed(1);
-      let msg = `月最接近: ${Math.round(moonAlt).toLocaleString()} km（T+${days}日）`;
-      if (result.crashed) msg += ' ⚠ 地球に衝突';
-      else if (result.escaped) msg += ' ⚠ 脱出軌道';
-      else if (result.closestMoonKm < 1737) msg += ' ⚠ 月に衝突';
-      if (Math.abs(val - 100) < 0.05) msg += '\n黄線=簡易モデル / 元の線=実データ';
+      let msg = `${speedMs.toLocaleString()} m/s (${diffStr}) → `;
+      if (result.crashed) msg += '⚠ 地球に衝突';
+      else if (result.escaped) msg += '⚠ 脱出軌道（帰還不能）';
+      else if (result.closestMoonKm < 1737) msg += '⚠ 月に衝突';
+      else msg += `月最接近 ${Math.round(moonAlt).toLocaleString()} km（T+${days}日）`;
+      if (diff === 0) msg += '\n黄線=簡易モデル / 元の線=実データ';
       r.textContent = msg;
       r.className = (result.crashed || result.escaped || result.closestMoonKm < 1737) ? 'danger' : 'success';
     }
   }, 200);
+}
+
+tliSlider.addEventListener('input', () => runTliSim(parseInt(tliSlider.value)));
+tliInput.addEventListener('change', () => runTliSim(parseInt(tliInput.value) || TLI_NOMINAL));
+tliInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowUp') { e.preventDefault(); runTliSim((parseInt(tliInput.value) || TLI_NOMINAL) + 1); }
+  if (e.key === 'ArrowDown') { e.preventDefault(); runTliSim((parseInt(tliInput.value) || TLI_NOMINAL) - 1); }
 });
+
+window.adjustDv = (delta) => {
+  runTliSim((parseInt(tliInput.value) || TLI_NOMINAL) + delta);
+};
 
 window.togglePlay = () => {
   playing = !playing;
+  scrubbing = 0; // stop scrub when toggling play
   document.getElementById('play-btn').innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
 };
+
+// Scrub: press & hold ◀◀ / ▶▶ buttons
+let scrubbing = 0; // -1 = rewind, 0 = off, 1 = forward
+window.startScrub = (dir) => {
+  scrubbing = dir;
+  playing = false;
+  document.getElementById('play-btn').innerHTML = '&#9654;';
+};
+window.stopScrub = () => { scrubbing = 0; };
+
+// Keyboard controls
+document.addEventListener('keydown', (e) => {
+  // Don't capture when typing in input fields
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    scrubbing = 1;
+    playing = false;
+    document.getElementById('play-btn').innerHTML = '&#9654;';
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    scrubbing = -1;
+    playing = false;
+    document.getElementById('play-btn').innerHTML = '&#9654;';
+  } else if (e.key === ' ') {
+    e.preventDefault();
+    togglePlay();
+  }
+});
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+    scrubbing = 0;
+  }
+});
 
 window.cycleSpeed = () => {
   speedIdx = (speedIdx + 1) % speeds.length;
@@ -951,14 +1243,16 @@ function updateFrame(metH) {
   // Info panel
   updateInfoPanel(metH);
 
-  // Event notification
+  // Event notification (only when advancing forward past an event)
   const ev = getCurrentEvent(metH);
   if (ev && ev.idx !== lastEventIdx) {
+    if (ev.idx > lastEventIdx) {
+      const evEl = document.getElementById('event-banner');
+      evEl.textContent = `▶ ${ev.name}`;
+      evEl.style.opacity = '1';
+      setTimeout(() => { evEl.style.opacity = '0'; }, 3000);
+    }
     lastEventIdx = ev.idx;
-    const evEl = document.getElementById('event-banner');
-    evEl.textContent = `▶ ${ev.name}`;
-    evEl.style.opacity = '1';
-    setTimeout(() => { evEl.style.opacity = '0'; }, 3000);
   }
 }
 
@@ -972,24 +1266,45 @@ function animate(now) {
   const dt = (now - lastTime) / 1000;
   lastTime = now;
 
-  if (playing && horizData) {
-    metHours += (dt * speedMultiplier) / 3600;
+  if (horizData && (playing || scrubbing !== 0)) {
+    const dir = scrubbing !== 0 ? scrubbing : 1;
+    metHours += (dt * speedMultiplier * dir) / 3600;
     const maxMet = horizData.last_met_h;
-    if (metHours > maxMet) metHours = horizData.first_met_h;
+    if (metHours > maxMet) metHours = playing ? 0 : maxMet;
+    if (metHours < 0) metHours = 0;
     timeline.value = (metHours / MISSION_HOURS) * 1000;
     updateFrame(metHours);
   }
 
-  // Locator rings always face camera
+  // Locator rings: face camera + scale with distance
   scRing.lookAt(camera.position);
+  const scCamDist = camera.position.distanceTo(scGroup.position);
+  const scScale = Math.max(0.05, Math.min(0.5, scCamDist * 0.0027));
+  scRing.scale.setScalar(scScale);
+  scDot.scale.setScalar(scScale);
+  scGlow.scale.setScalar(scScale);
+
   moonRing.lookAt(camera.position);
+  // Event markers: face camera + scale with distance
+  for (let i = 0; i < eventMarkersGroup.children.length; i += 2) {
+    const marker = eventMarkersGroup.children[i];
+    const ring = eventMarkersGroup.children[i + 1];
+    if (!marker || !ring) continue;
+    const dist = camera.position.distanceTo(marker.position);
+    const s = Math.max(0.05, Math.min(0.5, dist * 0.0027));
+    marker.scale.setScalar(s);
+    ring.scale.setScalar(s);
+    ring.lookAt(camera.position);
+  }
 
   // Moon ring: visible when camera is far, fades when close
   const moonCamDist = camera.position.distanceTo(moonGroup.position);
   moonRingMat.opacity = Math.min(0.5, Math.max(0, (moonCamDist - 10) / 20));
 
-  // Glow pulse
-  scGlow.material.opacity = 0.25 + 0.15 * Math.sin(now * 0.003);
+  // Glow: constant max brightness
+  scGlow.material.opacity = 0.8;
+  // Ring: pulsing
+  ringMat.opacity = 0.5 + 0.5 * Math.abs(Math.sin(now * 0.004));
 
   // Camera follow modes
   if (camMode !== 'free' && horizData) {
@@ -1043,6 +1358,10 @@ function animate(now) {
       KSC_ECEF[0] * sinE + KSC_ECEF[1] * cosE,
       KSC_ECEF[2]
     );
+    // Face outward from Earth center (stuck to surface)
+    kscMarker.lookAt(kscMarker.position.clone().multiplyScalar(2));
+    const kscDist = camera.position.distanceTo(kscMarker.position);
+    kscMarker.scale.setScalar(Math.max(0.05, Math.min(0.5, kscDist * 0.0027)));
   }
 
   orbitControls.update();
@@ -1056,11 +1375,13 @@ async function init() {
   await loadTrajectory();
   buildTrajectoryLine();
   buildMoonOrbitLine();
+  buildOrbitalGrid();
+  buildEventMarkers();
   buildMarkers();
   metHours = 0;
   updateFrame(0);
-  // Run initial simulation at 100% to show model vs real data
-  updateSimLine(1.0);
+  // Run initial simulation at nominal speed
+  runTliSim(TLI_NOMINAL);
 
   document.getElementById('loading').classList.add('hidden');
   animate(performance.now());
@@ -1070,7 +1391,10 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  if (trajLineMat) trajLineMat.resolution.set(window.innerWidth, window.innerHeight);
+  const res = new THREE.Vector2(window.innerWidth, window.innerHeight);
+  if (trajLineMat) trajLineMat.resolution.copy(res);
+  if (simLineMat) simLineMat.resolution.copy(res);
+  if (simLineExtMat) simLineExtMat.resolution.copy(res);
 });
 
 init();

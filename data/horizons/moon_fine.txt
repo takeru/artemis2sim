@@ -4,7 +4,7 @@ API SOURCE: NASA/JPL Horizons API
 
 
 *******************************************************************************
-Ephemeris / API_USER Wed Apr  1 04:39:47 2026 Pasadena, USA      / Horizons
+Ephemeris / API_USER Wed Apr  1 23:14:06 2026 Pasadena, USA      / Horizons
 *******************************************************************************
 Target body name: Moon (301)                      {source: DE441}
 Center body name: Earth (399)                     {source: DE441}
@@ -21,8 +21,8 @@ Output units    : KM-S
 Calendar mode   : Mixed Julian/Gregorian
 Output type     : GEOMETRIC cartesian states
 Output format   : 3 (position, velocity, LT, range, range-rate)
-EOP file        : eop.260331.p260627
-EOP coverage    : DATA-BASED 1962-JAN-20 TO 2026-MAR-31. PREDICTS-> 2026-JUN-26
+EOP file        : eop.260401.p260628
+EOP coverage    : DATA-BASED 1962-JAN-20 TO 2026-APR-01. PREDICTS-> 2026-JUN-27
 Reference frame : ICRF
 *******************************************************************************
 JDTDB

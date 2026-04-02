@@ -6,6 +6,7 @@ Usage:
 """
 import json, re, math, sys
 from datetime import datetime, timezone
+from scipy.optimize import minimize
 
 def parse_horizons(filepath):
     """Parse Horizons vector output into list of {jd, x, y, z, vx, vy, vz}."""
@@ -78,8 +79,8 @@ def utc_to_jd(dt):
     return int(365.25 * (y + 4716)) + int(30.6001 * (m + 1)) + d + ut / 24 + B - 1524.5
 
 
-# Default: 2026-04-01 22:24 UTC (Artemis II nominal launch)
-DEFAULT_LAUNCH_UTC = "2026-04-01T22:24"
+# Default: 2026-04-01 22:35 UTC (Artemis II actual launch)
+DEFAULT_LAUNCH_UTC = "2026-04-01T22:35"
 
 def parse_launch_time():
     """Parse launch time from CLI arg or use default. Returns JD."""
@@ -225,20 +226,33 @@ def lambert(r1_vec, r2_vec, tof_sec, mu=398600.4418):
     return v1, v2
 
 
+J2 = 1.08263e-3   # Earth J2
+R_E_J2 = 6378.137  # Earth equatorial radius for J2 (km)
+
 def rk4_step(state, dt, mu=398600.4418, moon_pos=None, mu_moon=4902.8):
     """RK4 integration step. state = [x,y,z,vx,vy,vz].
-    If moon_pos is provided, includes lunar gravity (3-body)."""
+    Includes Earth J2 and optional lunar gravity."""
     def deriv(s):
         r = math.sqrt(s[0]**2 + s[1]**2 + s[2]**2)
-        r3 = r**3
+        r2 = r * r
+        r3 = r2 * r
         ax, ay, az = -mu*s[0]/r3, -mu*s[1]/r3, -mu*s[2]/r3
+
+        # J2 perturbation disabled: introduces 41km error vs Horizons data.
+        # Likely due to ICRF Z ≠ Earth spin axis (0.004° offset) or
+        # interaction with our simplified orbital model. Needs investigation.
+        # z2_r2 = s[2]**2 / r2
+        # fJ2 = 1.5 * J2 * mu * R_E_J2**2 / (r2 * r3)
+        # ax += fJ2 * s[0] * (5 * z2_r2 - 1)
+        # ay += fJ2 * s[1] * (5 * z2_r2 - 1)
+        # az += fJ2 * s[2] * (5 * z2_r2 - 3)
+
         if moon_pos:
             dx = s[0] - moon_pos[0]
             dy = s[1] - moon_pos[1]
             dz = s[2] - moon_pos[2]
             rm = math.sqrt(dx**2 + dy**2 + dz**2)
             rm3 = rm**3
-            # Moon direct + indirect term
             rm0 = math.sqrt(moon_pos[0]**2 + moon_pos[1]**2 + moon_pos[2]**2)
             rm03 = rm0**3
             ax += -mu_moon * dx / rm3 - mu_moon * moon_pos[0] / rm03
@@ -282,267 +296,290 @@ def ksc_icrf(jd):
 
 
 def synthesize_early_trajectory(first_sc, first_moon, launch_jd, SCALE):
-    """Synthesize MET 0 to first Horizons point.
+    """Synthesize MET 0 to first Horizons point using 3-phase orbital mechanics.
 
-    Strategy:
-    1. KSC position at T+0
-    2. Short ascent to LEO altitude (T+0 to T+0.13h)
-    3. Lambert problem: find the Keplerian arc from LEO position (T+0.13h)
-       to the first Horizons point (T+3.6h)
-    4. Forward propagate along the Lambert orbit
-    This represents the combined effect of all burns as a single transfer orbit.
+    Phase 0: Launch ascent (T+0 to T+0.13h)
+    Phase 1: Insertion orbit (T+0.13h to burn1) — perigee 27km, apogee 2222km
+    Phase 2: After burn1 (perigee raise, ~44 m/s at apogee) — coast to burn2
+    Phase 3: After burn2 (apogee raise, ~2276 m/s at perigee, 18min) — coast to Horizons
+    Burns optimized to match Horizons endpoint (position + velocity direction).
     """
     first_met_h = compute_met_hours(first_sc['jd'], launch_jd)
     print(f"  Synthesizing MET 0 to {first_met_h:.1f}h", file=sys.stderr)
 
     r_target = [first_sc['x'], first_sc['y'], first_sc['z']]
     v_target = [first_sc['vx'], first_sc['vy'], first_sc['vz']]
-
-    moon_pos = [first_moon['x'] * SCALE, first_moon['y'] * SCALE, first_moon['z'] * SCALE]
+    moon_pos_scene = [first_moon['x'] * SCALE, first_moon['y'] * SCALE, first_moon['z'] * SCALE]
     moon_dist_km = mag([first_moon['x'], first_moon['y'], first_moon['z']])
+    moon_km = [first_moon['x'], first_moon['y'], first_moon['z']]
 
-    # --- KSC position ---
+    MU = 398600.4418
+    R_E = 6378
+
+    # --- Orbital plane + basis vectors from Horizons ---
     ksc_pos = ksc_icrf(launch_jd)
     print(f"  KSC ICRF: ({ksc_pos[0]:.0f}, {ksc_pos[1]:.0f}, {ksc_pos[2]:.0f}) km", file=sys.stderr)
 
-    # Orbital plane from Horizons data
     h_vec = norm(cross(r_target, v_target))
-    # Project KSC onto orbital plane and raise to LEO altitude
-    ksc_dot_h = dot(ksc_pos, h_vec)
-    ksc_in_plane = [ksc_pos[i] - ksc_dot_h * h_vec[i] for i in range(3)]
-    ksc_dir = norm(ksc_in_plane)
-    v_dir = norm(cross(h_vec, ksc_dir))
+    ksc_in_plane = [ksc_pos[i] - dot(ksc_pos, h_vec) * h_vec[i] for i in range(3)]
+    e1_base = norm(ksc_in_plane)
+    e2_base = norm(cross(h_vec, e1_base))
 
-    LEO_R = 6578.0  # km
-    LEO_OMEGA = math.sqrt(398600 / LEO_R ** 3)
+    # --- Orbital parameters ---
+    INS_PERI = R_E + 27;   INS_APO = R_E + 2222
+    RAISED_PERI = R_E + 185
+    CHECKOUT_APO = R_E + 70000
 
-    # LEO position at T+0.13h (after ascent): ~1 minute into orbit
-    ascent_end_h = 0.13
-    ascent_end_sec = ascent_end_h * 3600
-    angle_at_ascent = LEO_OMEGA * ascent_end_sec
-    r_leo = add_vec(
-        scale_vec(ksc_dir, LEO_R * math.cos(angle_at_ascent)),
-        scale_vec(v_dir, LEO_R * math.sin(angle_at_ascent))
-    )
+    a_ins = (INS_PERI + INS_APO) / 2
+    e_ins = (INS_APO - INS_PERI) / (INS_APO + INS_PERI)
+    p_ins = a_ins * (1 - e_ins**2)
+    omega_ins = math.sqrt(MU / a_ins**3)
 
-    # --- Two-burn transfer: LEO → intermediate → high-elliptical ---
-    BURN1_H = 0.82   # perigee raise (~T+49min): prograde, raises apogee
-    BURN2_H = 1.5    # apogee raise (~T+1.5h): prograde, raises perigee
+    def v_at(r, a):
+        return math.sqrt(MU * (2/r - 1/a))
 
-    # LEO state at burn1
-    burn1_sec = BURN1_H * 3600
-    angle_at_burn1 = LEO_OMEGA * burn1_sec
-    r_burn1 = add_vec(
-        scale_vec(ksc_dir, LEO_R * math.cos(angle_at_burn1)),
-        scale_vec(v_dir, LEO_R * math.sin(angle_at_burn1))
-    )
-    v_leo_dir = norm([
-        -math.sin(angle_at_burn1) * ksc_dir[i] + math.cos(angle_at_burn1) * v_dir[i]
-        for i in range(3)
-    ])
-    v_leo = scale_vec(v_leo_dir, LEO_R * LEO_OMEGA)
+    ASCENT_H = 0.13
+    BURN1_H = 0.82   # perigee raise (ICPS) ~T+49min
+    BURN2_H = 1.8    # apogee raise (ICPS) ~T+1:48, 18min burn
+    dt = 10.0
 
-    # Use shooting method: find burn1 Δv (prograde) that, after propagation
-    # through burn2 point and to T+3.6h, best matches the Horizons position.
-    # Burn2 is also prograde, we optimize both magnitudes.
-    moon_km = [first_moon['x'], first_moon['y'], first_moon['z']]
-    dt_rk4 = 10.0  # 10-second integration steps
+    def kepler_solve_burn(M, ecc, a, tol=1e-10):
+        E = M
+        for _ in range(50):
+            dE = (M - E + ecc * math.sin(E)) / (1 - ecc * math.cos(E))
+            E += dE
+            if abs(dE) < tol: break
+        nu = 2 * math.atan2(math.sqrt(1+ecc)*math.sin(E/2), math.sqrt(1-ecc)*math.cos(E/2))
+        r = a * (1 - ecc * math.cos(E))
+        return nu, r
 
-    # Radial direction at burn1 (perpendicular to velocity, in orbital plane)
-    r_burn1_dir = norm(r_burn1)
+    # Nominal Δv
+    a_after1 = (RAISED_PERI + INS_APO) / 2
+    a_after2 = (RAISED_PERI + CHECKOUT_APO) / 2
+    M_b1 = omega_ins * BURN1_H * 3600
+    nu_b1_nom, r_b1_mag_nom = kepler_solve_burn(M_b1, e_ins, a_ins)
+    dv1_nom = v_at(INS_APO, a_after1) - v_at(r_b1_mag_nom, a_ins)
+    dv2_nom = v_at(RAISED_PERI, a_after2) - v_at(RAISED_PERI, a_after1)
+    print(f"  Nominal: dv1={dv1_nom*1000:.0f} m/s, dv2={dv2_nom*1000:.0f} m/s", file=sys.stderr)
 
-    def propagate_two_burns(dv1, dv2, dv1_radial=0, dv2_radial=0):
-        """Apply burns and propagate. Returns final (position, velocity)."""
-        # Burn 1: prograde + radial components
-        v_after1 = add_vec(v_leo,
-            add_vec(scale_vec(v_leo_dir, dv1), scale_vec(r_burn1_dir, dv1_radial)))
-        state = list(r_burn1) + v_after1
+    # --- Propagation with burns + launch azimuth parameter ---
+    def rotate_basis(angle):
+        """Rotate e1/e2 in the orbital plane by angle (radians)."""
+        c, s = math.cos(angle), math.sin(angle)
+        e1r = [c*e1_base[i] + s*e2_base[i] for i in range(3)]
+        e2r = [-s*e1_base[i] + c*e2_base[i] for i in range(3)]
+        return e1r, e2r
 
-        steps_to_burn2 = int((BURN2_H - BURN1_H) * 3600 / dt_rk4)
-        for _ in range(steps_to_burn2):
-            state = rk4_step(state, dt_rk4, moon_pos=moon_km)
+    def get_burn1_state(azimuth, ins_peri=INS_PERI, ins_apo=INS_APO, b1h=BURN1_H, m_off=0):
+        """Compute burn1 position/velocity for given launch azimuth and insertion orbit."""
+        e1r, e2r = rotate_basis(azimuth)
+        a = (ins_peri + ins_apo) / 2
+        e = (ins_apo - ins_peri) / (ins_apo + ins_peri)
+        omega = math.sqrt(MU / a**3)
+        M = omega * b1h * 3600 + m_off
+        nu, r_mag = kepler_solve_burn(M, e, a)
+        r = add_vec(scale_vec(e1r, r_mag * math.cos(nu)),
+                    scale_vec(e2r, r_mag * math.sin(nu)))
+        v_dir = norm([-math.sin(nu) * e1r[i] + math.cos(nu) * e2r[i] for i in range(3)])
+        v_mag = v_at(r_mag, a)
+        return r, scale_vec(v_dir, v_mag), v_dir, norm(r)
 
-        # Burn 2: prograde + radial
-        v_dir2 = norm(state[3:])
-        r_dir2 = norm(state[:3])
-        state[3] += v_dir2[0] * dv2 + r_dir2[0] * dv2_radial
-        state[4] += v_dir2[1] * dv2 + r_dir2[1] * dv2_radial
-        state[5] += v_dir2[2] * dv2 + r_dir2[2] * dv2_radial
+    def propagate(dv1, dv2, dv1r, dv2r, azimuth, ins_peri=INS_PERI, ins_apo=INS_APO, b1h=BURN1_H, b2h=BURN2_H, m_off=0):
+        r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(azimuth, ins_peri, ins_apo, b1h, m_off)
+        v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1), scale_vec(r_b1_hat, dv1r)))
+        st = list(r_b1) + v_after
+        elapsed = 0.0; seg1 = (b2h - b1h) * 3600
+        while elapsed < seg1:
+            st = rk4_step(st, min(dt, seg1 - elapsed), moon_pos=moon_km)
+            elapsed += min(dt, seg1 - elapsed)
+        vd = norm(st[3:]); rd = norm(st[:3])
+        st[3] += vd[0]*dv2 + rd[0]*dv2r
+        st[4] += vd[1]*dv2 + rd[1]*dv2r
+        st[5] += vd[2]*dv2 + rd[2]*dv2r
+        elapsed = 0.0; seg2 = (first_met_h - b2h) * 3600
+        while elapsed < seg2:
+            st = rk4_step(st, min(dt, seg2 - elapsed), moon_pos=moon_km)
+            elapsed += min(dt, seg2 - elapsed)
+        return st[:3], st[3:]
 
-        steps_to_end = int((first_met_h - BURN2_H) * 3600 / dt_rk4)
-        for _ in range(steps_to_end):
-            state = rk4_step(state, dt_rk4, moon_pos=moon_km)
+    def cost_vec(x):
+        # x = [dv1, dv2, dv1r, dv2r, azimuth, ins_peri, ins_apo]
+        try:
+            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+            pe = mag([pos[i] - r_target[i] for i in range(3)])
+            ve = mag([vel[i] - v_target[i] for i in range(3)]) * 1000
+            return pe + ve
+        except:
+            return 1e12
 
-        return state[:3], state[3:]  # position, velocity
+    # 9 params: Δv (4) + azimuth + insertion orbit (2) + burn effective times (2)
+    # Burn times are optimizable: impulsive approximation of finite-duration burns
+    # means the "effective time" differs from the start/end time
+    x0 = [dv1_nom, dv2_nom, 0, 0, 0, INS_PERI, INS_APO, BURN1_H, BURN2_H, 0]
+    bounds = [
+        (-0.5, 1.0),            # dv1
+        (1.5, 3.5),             # dv2
+        (-0.3, 0.3),            # dv1r
+        (-0.3, 0.3),            # dv2r
+        (-0.2, 0.2),            # azimuth
+        (R_E - 200, R_E + 200), # ins_peri
+        (R_E + 500, R_E + 5000),# ins_apo
+        (0.6, 1.1),             # burn1 effective time
+        (1.5, 2.2),             # burn2 effective time
+        (-3.14, 3.14),          # M_offset (mean anomaly offset, radians)
+    ]
 
-    def cost(dv1, dv2, dv1r=0, dv2r=0):
-        """Cost: position error + velocity direction error."""
-        pos, vel = propagate_two_burns(dv1, dv2, dv1r, dv2r)
-        pos_err = mag([pos[i] - r_target[i] for i in range(3)])
-        # Velocity direction error (angle between vectors, scaled to km)
-        vel_dir = norm(vel)
-        tgt_dir = norm(v_target)
-        cos_angle = max(-1, min(1, dot(vel_dir, tgt_dir)))
-        angle_err = math.acos(cos_angle)  # radians
-        # Weight: 1 degree of direction error ≈ 100 km position equivalent
-        return pos_err + angle_err * 180 / math.pi * 100
+    def cost_bounded(x):
+        for i, (lo, hi) in enumerate(bounds):
+            if x[i] < lo or x[i] > hi:
+                return 1e12
+        try:
+            pos, vel = propagate(x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8], x[9])
+            pe = mag([pos[i] - r_target[i] for i in range(3)])
+            ve = mag([vel[i] - v_target[i] for i in range(3)]) * 1000
+            return pe + ve
+        except:
+            return 1e12
 
-    # Multi-level optimization: 4 params (dv1, dv2 prograde + radial)
-    best_cost = float('inf')
-    best_params = [1.0, 2.0, 0.0, 0.0]  # dv1, dv2, dv1_radial, dv2_radial
+    result = minimize(cost_bounded, x0, method='Nelder-Mead',
+                      options={'maxiter': 20000, 'xatol': 1e-6, 'fatol': 0.01, 'adaptive': True})
 
-    # Level 1: coarse prograde-only search
-    for dv1 in [x * 0.5 for x in range(0, 14)]:
-        for dv2 in [x * 0.5 for x in range(0, 14)]:
-            try:
-                c = cost(dv1, dv2)
-                if c < best_cost:
-                    best_cost = c
-                    best_params = [dv1, dv2, 0, 0]
-            except:
-                continue
+    dv1o, dv2o, dv1ro, dv2ro, az_opt, ins_peri_opt, ins_apo_opt, b1h_opt, b2h_opt, m_offset_opt = result.x
+    fp, fv = propagate(dv1o, dv2o, dv1ro, dv2ro, az_opt, ins_peri_opt, ins_apo_opt, b1h_opt, b2h_opt, m_offset_opt)
+    pe = mag([fp[i]-r_target[i] for i in range(3)])
+    va = math.degrees(math.acos(max(-1, min(1, dot(norm(fv), norm(v_target))))))
+    print(f"  Optimized ({result.nfev} evals): dv1={dv1o*1000:.0f}+{dv1ro*1000:.0f}r, "
+          f"dv2={dv2o*1000:.0f}+{dv2ro*1000:.0f}r, az={math.degrees(az_opt):.1f}deg, "
+          f"peri={ins_peri_opt-R_E:.0f}km, apo={ins_apo_opt-R_E:.0f}km, "
+          f"b1={b1h_opt:.3f}h, b2={b2h_opt:.3f}h, M0={math.degrees(m_offset_opt):.1f}deg, "
+          f"pos={pe:.0f}km, vel={va:.1f}deg", file=sys.stderr)
 
-    # Level 2-5: refine all 4 params with decreasing step
-    for step in [0.1, 0.02, 0.005, 0.001]:
-        prev = list(best_params)
-        rng = range(-5, 6)
-        for d1 in [prev[0] + x * step for x in rng]:
-            for d2 in [prev[1] + x * step for x in rng]:
-                for d1r in [prev[2] + x * step * 0.5 for x in rng]:
-                    for d2r in [prev[3] + x * step * 0.5 for x in rng]:
-                        try:
-                            c = cost(d1, d2, d1r, d2r)
-                            if c < best_cost:
-                                best_cost = c
-                                best_params = [d1, d2, d1r, d2r]
-                        except:
-                            continue
+    # Use optimized values for trajectory generation
+    e1, e2 = rotate_basis(az_opt)
+    a_ins = (ins_peri_opt + ins_apo_opt) / 2
+    e_ins = (ins_apo_opt - ins_peri_opt) / (ins_apo_opt + ins_peri_opt)
+    p_ins = a_ins * (1 - e_ins**2)
+    omega_ins = math.sqrt(MU / a_ins**3)
+    INS_PERI = ins_peri_opt
+    INS_APO = ins_apo_opt
+    BURN1_H = b1h_opt
+    BURN2_H = b2h_opt
 
-    best_dv1, best_dv2, best_dv1r, best_dv2r = best_params
-    final_pos, final_vel = propagate_two_burns(best_dv1, best_dv2, best_dv1r, best_dv2r)
-    best_err = mag([final_pos[i] - r_target[i] for i in range(3)])
-    vel_angle = math.degrees(math.acos(max(-1, min(1, dot(norm(final_vel), norm(v_target))))))
-
-
-    print(f"  Two-burn solution: Δv1={best_dv1:.3f}+{best_dv1r:.3f}r km/s, "
-          f"Δv2={best_dv2:.3f}+{best_dv2r:.3f}r km/s, "
-          f"pos error={best_err:.0f} km, vel angle={vel_angle:.1f}°", file=sys.stderr)
-
-    # --- Generate trajectory with the best burns ---
-    v_after1 = add_vec(v_leo,
-        add_vec(scale_vec(v_leo_dir, best_dv1), scale_vec(r_burn1_dir, best_dv1r)))
-    r_burn1_final = list(r_burn1)
-
-    # --- Generate trajectory points ---
+    # --- Generate points ---
     points = []
-
-    # Phase 1: Launch ascent (T+0 to T+0.13h)
-    for i in range(20):
-        t = i / 19
-        met_h = t * ascent_end_h
-        t_sec = met_h * 3600
-        r_asc = 6378 + t * 200
-        angle = LEO_OMEGA * t_sec * t
-        pos = add_vec(
-            scale_vec(ksc_dir, r_asc * math.cos(angle)),
-            scale_vec(v_dir, r_asc * math.sin(angle))
-        )
-        spd = 0.4 + t * 7.4
-        d_earth = mag(pos)
+    def add_pt(met_h, pos, spd):
+        de = mag(pos)
         points.append({
-            'met': round(met_h, 4),
-            'x': round(pos[0] * SCALE, 4), 'y': round(pos[1] * SCALE, 4), 'z': round(pos[2] * SCALE, 4),
-            'mx': round(moon_pos[0], 4), 'my': round(moon_pos[1], 4), 'mz': round(moon_pos[2], 4),
-            'spd': round(spd, 3), 'dE': round(d_earth, 0), 'dM': round(moon_dist_km, 0),
+            'met': round(met_h, 4), 'x': round(pos[0]*SCALE, 4),
+            'y': round(pos[1]*SCALE, 4), 'z': round(pos[2]*SCALE, 4),
+            'mx': round(moon_pos_scene[0], 4), 'my': round(moon_pos_scene[1], 4),
+            'mz': round(moon_pos_scene[2], 4),
+            'spd': round(spd, 3), 'dE': round(de, 0), 'dM': round(moon_dist_km, 0),
         })
 
-    # Phase 2: LEO circular orbit (T+0.13h to T+0.82h, ~half orbit)
-    n_leo_steps = int((BURN1_H - ascent_end_h) * 3600 / 30)  # every 30 sec
-    for i in range(1, n_leo_steps + 1):
-        t_sec = (ascent_end_h * 3600) + i * 30
-        met_h = t_sec / 3600
-        angle = LEO_OMEGA * t_sec
-        pos = add_vec(
-            scale_vec(ksc_dir, LEO_R * math.cos(angle)),
-            scale_vec(v_dir, LEO_R * math.sin(angle))
-        )
-        d_earth = mag(pos)
-        points.append({
-            'met': round(met_h, 4),
-            'x': round(pos[0] * SCALE, 4), 'y': round(pos[1] * SCALE, 4), 'z': round(pos[2] * SCALE, 4),
-            'mx': round(moon_pos[0], 4), 'my': round(moon_pos[1], 4), 'mz': round(moon_pos[2], 4),
-            'spd': round(7.8, 3), 'dE': round(d_earth, 0), 'dM': round(moon_dist_km, 0),
-        })
+    # Kepler equation solver: M → E → nu → r
+    def kepler_solve(M, ecc, tol=1e-10):
+        """Solve Kepler's equation M = E - e*sin(E) for E."""
+        E = M
+        for _ in range(50):
+            dE = (M - E + ecc * math.sin(E)) / (1 - ecc * math.cos(E))
+            E += dE
+            if abs(dE) < tol: break
+        nu = 2 * math.atan2(math.sqrt(1+ecc)*math.sin(E/2), math.sqrt(1-ecc)*math.cos(E/2))
+        r = a_ins * (1 - ecc * math.cos(E))
+        return nu, r
 
-    # Phase 3: Two-burn transfer (T+0.82h to T+3.6h)
-    state = list(r_burn1_final) + list(v_after1)
-    dt_prop = 10.0
-    sample_every = 6  # every 60 seconds
-    burn2_applied = False
-    total_steps = int((first_met_h - BURN1_H) * 3600 / dt_prop)
+    # Phase 0+1 combined: ascent then insertion orbit
+    # Compute Phase 1's state at ASCENT_H for smooth connection
+    M_ascent = omega_ins * ASCENT_H * 3600
+    nu_ascent, _ = kepler_solve(M_ascent, e_ins)
 
-    for step in range(total_steps + 1):
-        elapsed_sec = step * dt_prop
-        met_h = BURN1_H + elapsed_sec / 3600
+    # Phase 0: Ascent (T+0 to T+0.13h)
+    # At MECO (T+8min), spacecraft is already on the 27x2222km insertion orbit.
+    # Ascent smoothly transitions from ground to Kepler orbit position.
+    M_meco = omega_ins * ASCENT_H * 3600 + m_offset_opt
+    nu_meco, r_meco = kepler_solve(M_meco, e_ins)
+    r_meco = max(r_meco, R_E + 10)
 
-        # Apply burn2 at the right time
-        if not burn2_applied and met_h >= BURN2_H:
-            v_dir2 = norm(state[3:])
-            r_dir2 = norm(state[:3])
-            state[3] += v_dir2[0] * best_dv2 + r_dir2[0] * best_dv2r
-            state[4] += v_dir2[1] * best_dv2 + r_dir2[1] * best_dv2r
-            state[5] += v_dir2[2] * best_dv2 + r_dir2[2] * best_dv2r
-            burn2_applied = True
+    n_ascent = max(2, int(ASCENT_H * 3600 / 10))
+    for i in range(n_ascent + 1):
+        t = i / n_ascent
+        met_h = t * ASCENT_H
+        # Radius: ground → Kepler radius at MECO
+        r = R_E + t * (r_meco - R_E)
+        # Angle: 0 → nu_meco
+        ang = t * nu_meco
+        pos = add_vec(scale_vec(e1, r*math.cos(ang)), scale_vec(e2, r*math.sin(ang)))
+        spd = 0.4 + t * (v_at(r_meco, a_ins) - 0.4)
+        add_pt(met_h, pos, spd)
 
-        if step % sample_every == 0:
-            pos = state[:3]
-            spd = mag(state[3:])
-            d_earth = mag(pos)
-            points.append({
-                'met': round(met_h, 4),
-                'x': round(pos[0] * SCALE, 4), 'y': round(pos[1] * SCALE, 4), 'z': round(pos[2] * SCALE, 4),
-                'mx': round(moon_pos[0], 4), 'my': round(moon_pos[1], 4), 'mz': round(moon_pos[2], 4),
-                'spd': round(spd, 3), 'dE': round(d_earth, 0), 'dM': round(moon_dist_km, 0),
-            })
+    # Phase 1: Insertion orbit (T+0.13h to burn1), every 10 seconds
+    # Already on Kepler orbit, no blending needed
+    for i in range(1, int((BURN1_H - ASCENT_H) * 3600 / 10) + 1):
+        ts = ASCENT_H * 3600 + i * 10
+        met_h = ts / 3600
+        if met_h > BURN1_H: break
+        M = omega_ins * ts + m_offset_opt
+        nu, r = kepler_solve(M, e_ins)
+        r = max(r, R_E + 10)
+        # Position in orbital plane using true anomaly
+        # nu is measured from perigee; in our basis, perigee is at e1 direction
+        pos = add_vec(scale_vec(e1, r*math.cos(nu)), scale_vec(e2, r*math.sin(nu)))
+        add_pt(met_h, pos, v_at(r, a_ins))
 
-        state = rk4_step(state, dt_prop, moon_pos=moon_km)
+    # Phase 2+3: Two burns + propagation (mirroring propagate() exactly)
+    r_b1, v_b1, v_b1_dir, r_b1_hat = get_burn1_state(az_opt, ins_peri_opt, ins_apo_opt, b1h_opt, m_offset_opt)
+    v_after = add_vec(v_b1, add_vec(scale_vec(v_b1_dir, dv1o), scale_vec(r_b1_hat, dv1ro)))
+    st = list(r_b1) + v_after
 
-    # Smooth velocity direction toward Horizons data in the last portion.
-    # Position already matches well; this corrects the velocity vector angle.
-    # Physically equivalent to a small trajectory correction maneuver.
-    BLEND_H = 0.2  # blend over last 0.2 hours
-    blend_start_met = first_met_h - BLEND_H
-    target_spd = mag(v_target)
-    for i, p in enumerate(points):
-        if p['met'] <= blend_start_met:
-            continue
-        t = (p['met'] - blend_start_met) / BLEND_H
-        t = t * t * (3 - 2 * t)  # smoothstep
-        # Blend position toward target
-        p['x'] = round(p['x'] * (1 - t) + r_target[0] * SCALE * t, 4)
-        p['y'] = round(p['y'] * (1 - t) + r_target[1] * SCALE * t, 4)
-        p['z'] = round(p['z'] * (1 - t) + r_target[2] * SCALE * t, 4)
-        p['spd'] = round(p['spd'] * (1 - t) + target_spd * t, 3)
-        pos_km = [p['x'] / SCALE, p['y'] / SCALE, p['z'] / SCALE]
-        p['dE'] = round(mag(pos_km), 0)
+    # Segment 1: burn1 → burn2
+    seg1 = (BURN2_H - BURN1_H) * 3600
+    elapsed = 0.0; step = 0
+    while elapsed < seg1:
+        mh = BURN1_H + elapsed / 3600
+        if step % 6 == 0:
+            add_pt(mh, st[:3], mag(st[3:]))
+        this_dt = min(dt, seg1 - elapsed)
+        st = rk4_step(st, this_dt, moon_pos=moon_km)
+        elapsed += this_dt; step += 1
 
-    print(f"  Synthesized {len(points)} points, "
-          f"MET {points[0]['met']:.2f}h to {points[-1]['met']:.2f}h, "
-          f"min altitude {min(p['dE'] for p in points) - 6378:.0f} km",
-          file=sys.stderr)
+    # Apply burn2
+    vd = norm(st[3:]); rd = norm(st[:3])
+    st[3] += vd[0]*dv2o + rd[0]*dv2ro
+    st[4] += vd[1]*dv2o + rd[1]*dv2ro
+    st[5] += vd[2]*dv2o + rd[2]*dv2ro
 
+    # Segment 2: burn2 → Horizons
+    seg2 = (first_met_h - BURN2_H) * 3600
+    elapsed = 0.0; step = 0
+    while elapsed < seg2:
+        mh = BURN2_H + elapsed / 3600
+        if step % 6 == 0:
+            add_pt(mh, st[:3], mag(st[3:]))
+        this_dt = min(dt, seg2 - elapsed)
+        st = rk4_step(st, this_dt, moon_pos=moon_km)
+        elapsed += this_dt; step += 1
+
+    # Final point: propagated endpoint (should match r_target exactly)
+    add_pt(first_met_h, st[:3], mag(st[3:]))
+
+    print(f"  {len(points)} pts, MET {points[0]['met']:.2f}-{points[-1]['met']:.2f}h, "
+          f"min alt {min(p['dE'] for p in points)-6378:.0f}km", file=sys.stderr)
     return points
-
 
 # Mission events (MET in hours)
 EVENTS = [
     {'met': 0,       'name': '打ち上げ',               'name_en': 'Launch'},
-    {'met': 0.033,   'name': 'SRB分離',               'name_en': 'SRB Separation'},
-    {'met': 0.133,   'name': 'コアステージ分離 (MECO)', 'name_en': 'Core Stage Sep (MECO)'},
-    {'met': 0.817,   'name': '近地点上昇噴射',         'name_en': 'Perigee Raise Burn'},
-    {'met': 1.5,     'name': '遠地点上昇噴射',         'name_en': 'Apogee Raise Burn'},
-    {'met': 3.404,   'name': 'ICPS分離',              'name_en': 'ICPS Separation'},
-    {'met': 25.617,  'name': 'TLI（月遷移噴射）',      'name_en': 'Trans-Lunar Injection'},
+    {'met': 0.036,   'name': 'SRB分離',               'name_en': 'SRB Separation'},           # T+2:08
+    {'met': 0.135,   'name': 'MECO + コアステージ分離', 'name_en': 'MECO + Core Stage Sep'},   # T+8:06
+    {'met': 0.3,     'name': 'ソーラーパネル展開',      'name_en': 'Solar Array Deploy'},       # T+~18min
+    {'met': 0.817,   'name': '近地点上昇（ICPS RL10）', 'name_en': 'Perigee Raise (ICPS)'},    # T+49min
+    {'met': 1.8,     'name': '遠地点上昇（ICPS RL10）', 'name_en': 'Apogee Raise (ICPS)'},     # T+1:48
+    {'met': 3.4,     'name': 'ICPS分離',              'name_en': 'ICPS Separation'},           # T+3:24
+    {'met': 3.4,     'name': '近接運用デモ開始',       'name_en': 'Prox Ops Demo Start'},      # T+3:24
+    {'met': 4.6,     'name': '近接運用デモ終了',       'name_en': 'Prox Ops Demo End'},        # T+~4:35
+    {'met': 12.4,    'name': '近地点上昇（ESM AJ10）', 'name_en': 'Perigee Raise (ESM)'},     # T+~12h (Apr 2 morning)
+    {'met': 25.4,    'name': 'TLI（Orion ESM AJ10）',  'name_en': 'TLI (Orion ESM)'},         # T+1d01:27
     {'met': 103.0,   'name': '月重力圏突入',           'name_en': 'Lunar SOI Entry'},
     {'met': 120.6,   'name': '月最接近',               'name_en': 'Closest Lunar Approach'},
     {'met': 139.8,   'name': '月重力圏離脱',           'name_en': 'Lunar SOI Exit'},
@@ -618,6 +655,9 @@ def main():
             'x': round(sx, 4),
             'y': round(sy, 4),
             'z': round(sz, 4),
+            'vx': round(sc['vx'], 4),
+            'vy': round(sc['vy'], 4),
+            'vz': round(sc['vz'], 4),
             'mx': round(mx, 4),
             'my': round(my, 4),
             'mz': round(mz, 4),
